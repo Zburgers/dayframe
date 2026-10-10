@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isDayframeBackup, localDateTimeValue, parseMealAmount, suggestedMealTime } from "../app/lib/validation.ts";
+import { isDayframeBackup, localDateTimeValue, parseMealAmount, parseMealItems, suggestedMealTime } from "../app/lib/validation.ts";
 import { dayMetrics } from "../app/lib/metrics.ts";
 import { POST } from "../app/api/analyze-meal/route.ts";
 
@@ -16,6 +16,12 @@ test("meal amounts reject negative, infinite, empty required and out-of-bounds v
   assert.equal(parseMealAmount("NaN", 5000, true), null);
   assert.equal(parseMealAmount("5001", 5000, true), null);
   assert.equal(parseMealAmount("200", 5000, true), 200);
+});
+
+test("meal item editor sanitizes empty or oversized lists", () => {
+  assert.deepEqual(parseMealItems(" Rice, paneer , , yogurt"), ["Rice", "paneer", "yogurt"]);
+  assert.deepEqual(parseMealItems(null), []);
+  assert.equal(parseMealItems(Array.from({ length: 20 }, (_, i) => "item" + i).join(",")).length, 12);
 });
 
 test("meal form defaults to the selected day, not today's day", () => {
