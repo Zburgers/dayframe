@@ -5,7 +5,7 @@ import { completeness, dayMetrics, formatDuration, localDateKey, sevenDayAverage
 import { withAddedActivity, withRemovedActivity } from "./lib/activity";
 import { eraseState, normalizeState, readOpenAIKey, readState, writeOpenAIKey, writeState } from "./lib/storage";
 import { Activity, DayframeState, MealEstimate, MovementDay, emptyState } from "./lib/types";
-import { isDayframeBackup, localDateTimeValue, parseMealAmount, parseMealItems, suggestedMealTime } from "./lib/validation";
+import { isDayframeBackup, localDateTimeValue, parseMealAmount, parseMealItems, suggestedMealTime, suggestedSleepRange } from "./lib/validation";
 
 type Tab = "today" | "log" | "history" | "settings";
 type Notice = { kind: "success" | "error"; message: string } | null;
@@ -225,16 +225,26 @@ export default function Home() {
   function addManualSleep(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
-    const startedAt = new Date(String(form.get("sleepStart"))).toISOString();
-    const endedAt = new Date(String(form.get("sleepEnd"))).toISOString();
-    if (new Date(endedAt) <= new Date(startedAt) || new Date(endedAt).getTime() - new Date(startedAt).getTime() > 24 * 60 * 60 * 1000) {
+    const start = new Date(String(form.get("sleepStart") ?? ""));
+    const end = new Date(String(form.get("sleepEnd") ?? ""));
+    const duration = end.getTime() - start.getTime();
+    if (!Number.isFinite(duration) || duration <= 0 || duration > 24 * 60 * 60 * 1000) {
       flash("error", "Sleep end must be after the start and within 24 hours.");
       return;
     }
+    const startedAt = start.toISOString();
+    const endedAt = end.toISOString();
     setState((current) => ({ ...current, sleepSessions: [...current.sleepSessions, { id: id(), startedAt, endedAt }] }));
     setSelectedDate(localDateKey(endedAt));
     event.currentTarget.reset();
     flash("success", "Sleep session added.");
+  }
+
+  function removeSleep(sleepId: string) {
+    const session = state.sleepSessions.find((entry) => entry.id === sleepId);
+    if (!session || !window.confirm("Remove this recorded sleep session?")) return;
+    setState((current) => ({ ...current, sleepSessions: current.sleepSessions.filter((entry) => entry.id !== sleepId) }));
+    flash("success", "Sleep session removed.");
   }
 
   function importHealth() {
@@ -512,7 +522,7 @@ export default function Home() {
 
           <section className="surface timeline"><div className="section-heading"><div><p className="eyebrow">Recorded today</p><h2>Your entries</h2></div><button className="text-button" onClick={() => setTab("log")}>Add entry</button></div>
             {metrics.meals.length === 0 && metrics.activities.length === 0 && !metrics.sleepMinutes ? <div className="empty-state"><span>○</span><p>Nothing logged for this date yet.</p><button onClick={() => setTab("log")}>Log the first thing</button></div> : <div className="entry-list">
-              {metrics.sleepMinutes > 0 && <div className="entry-row"><span className="entry-icon indigo">Z</span><div><b>Sleep</b><small>{formatDuration(metrics.sleepMinutes)} ending this day</small></div></div>}
+              {state.sleepSessions.filter((session) => session.endedAt && localDateKey(session.endedAt) === selectedDate).map((session) => <div className="entry-row" key={session.id}><span className="entry-icon indigo">Z</span><div><b>Sleep</b><small>{formatDuration(Math.max(0, Math.round((new Date(session.endedAt!).getTime() - new Date(session.startedAt).getTime()) / 60000)))} ending this day</small></div><button className="delete-mini" onClick={() => removeSleep(session.id)} aria-label="Remove sleep session">×</button></div>)}
               {metrics.activities.map((activity) => <div className="entry-row" key={activity.id}><span className="entry-icon lime">M</span><div><b>{activity.name}</b><small>{activity.minutes} min · {activity.calories} active kcal</small></div></div>)}
               {metrics.meals.map((meal) => <div className="entry-row" key={meal.id}><span className="entry-icon coral">F</span><div><b>{meal.name}</b><small>{new Date(meal.eatenAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} · about {meal.calories} kcal</small></div><button className="secondary-button" onClick={() => editMeal(meal.id)} aria-label={`Edit ${meal.name}`}>Edit</button><button className="delete-mini" onClick={() => removeMeal(meal.id)} aria-label={`Remove ${meal.name}`}>×</button></div>)}
             </div>}
@@ -524,7 +534,7 @@ export default function Home() {
 
           <article className="surface log-card sleep-card"><div className="log-card-title"><span className="entry-icon indigo">Z</span><div><p className="eyebrow">Sleep</p><h2>{openSleep ? "Sleep timer is running" : "Rest, recorded simply"}</h2></div></div>
             <button className="primary-button indigo-button" onClick={openSleep ? finishSleep : startSleep}>{openSleep ? "I’m awake — finish session" : "Going to sleep now"}</button>
-            <details><summary>Add or correct times manually</summary><form className="form-grid" onSubmit={addManualSleep}><label>Went to sleep<input name="sleepStart" type="datetime-local" defaultValue={dateTimeInput(new Date(`${selectedDate}T23:00:00`))} required /></label><label>Woke up<input name="sleepEnd" type="datetime-local" defaultValue={dateTimeInput(new Date(new Date(`${selectedDate}T07:00:00`).getTime() + (selectedDate === today ? 0 : 86_400_000)))} required /></label><button className="secondary-button" type="submit">Save sleep</button></form></details>
+            <details><summary>Add or correct times manually</summary><form className="form-grid" key={`sleep-${selectedDate}`} onSubmit={addManualSleep}><label>Went to sleep<input name="sleepStart" type="datetime-local" defaultValue={suggestedSleepRange(selectedDate).start} required /></label><label>Woke up<input name="sleepEnd" type="datetime-local" defaultValue={suggestedSleepRange(selectedDate).end} required /></label><button className="secondary-button" type="submit">Save sleep</button></form></details>
           </article>
 
           <article className="surface log-card movement-card"><div className="log-card-title"><span className="entry-icon lime">M</span><div><p className="eyebrow">Movement</p><h2>Totals and activities</h2></div></div>
