@@ -17,11 +17,6 @@ function dateLabel(date: string, options: Intl.DateTimeFormatOptions = { weekday
   return new Intl.DateTimeFormat("en-IN", options).format(new Date(`${date}T12:00:00`));
 }
 
-function dateTimeInput(date: Date) {
-  const shifted = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
-  return shifted.toISOString().slice(0, 16);
-}
-
 async function normalizeMealImage(file: File): Promise<File> {
   if (file.size > 12 * 1024 * 1024) throw new Error("Choose a photo smaller than 12 MB.");
   const objectUrl = URL.createObjectURL(file);
