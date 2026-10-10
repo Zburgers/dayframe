@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isDayframeBackup, localDateTimeValue, parseMealAmount, parseMealItems, suggestedMealTime } from "../app/lib/validation.ts";
+import { isDayframeBackup, localDateTimeValue, parseMealAmount, parseMealItems, suggestedMealTime, suggestedSleepRange } from "../app/lib/validation.ts";
 import { dayMetrics } from "../app/lib/metrics.ts";
 import { withAddedActivity, withRemovedActivity } from "../app/lib/activity.ts";
 import { POST } from "../app/api/analyze-meal/route.ts";
@@ -113,4 +113,11 @@ test("Apple Health authoritative totals are never inflated by manually adding ac
   const removed = withRemovedActivity(added, "cycling", time);
   assert.equal(removed.activeCalories, 500);
   assert.equal(removed.exerciseMinutes, 60);
+});
+
+test("overnight sleep defaults end on the selected day and are ordered correctly", () => {
+  const range = suggestedSleepRange("2026-10-11");
+  assert.equal(range.start, "2026-10-10T23:00");
+  assert.equal(range.end, "2026-10-11T07:00");
+  assert.ok(Date.parse(range.start) < Date.parse(range.end));
 });
