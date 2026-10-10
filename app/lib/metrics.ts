@@ -1,4 +1,4 @@
-import { DayframeState, SleepSession } from "./types";
+import type { DayframeState, SleepSession } from "./types";
 
 export function localDateKey(value: Date | string): string {
   const date = typeof value === "string" ? new Date(value) : value;
