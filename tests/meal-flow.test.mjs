@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { isDayframeBackup, localDateTimeValue, parseMealAmount, parseMealItems, suggestedMealTime } from "../app/lib/validation.ts";
 import { dayMetrics } from "../app/lib/metrics.ts";
+import { withAddedActivity, withRemovedActivity } from "../app/lib/activity.ts";
 import { POST } from "../app/api/analyze-meal/route.ts";
 
 const empty = () => ({ version: 1, sleepSessions: [], movementDays: [], meals: [] });
@@ -74,4 +75,42 @@ test("meal API rejects unsupported photos before contacting the vision provider"
   form.append("image", new File(["not an image"], "food.txt", { type: "text/plain" }));
   const response = await POST(new Request("https://example.test/api/analyze-meal", { method: "POST", body: form }));
   assert.equal(response.status, 415);
+});
+
+test("activity-derived calories accumulate, while explicit daily totals stay unchanged", () => {
+  const date = "2026-10-11";
+  const time = "2026-10-11T10:00:00.000Z";
+  const walk = { id: "walk", name: "Walk", minutes: 30, calories: 130 };
+  const gym = { id: "gym", name: "Gym", minutes: 45, calories: 220 };
+  const first = withAddedActivity(undefined, date, walk, time);
+  assert.equal(first.activeCalories, 130);
+  assert.equal(first.exerciseMinutes, 30);
+  const second = withAddedActivity(first, date, gym, time);
+  assert.equal(second.activeCalories, 350);
+  assert.equal(second.exerciseMinutes, 75);
+  const withoutWalk = withRemovedActivity(second, "walk", time);
+  assert.equal(withoutWalk.activeCalories, 220);
+  assert.equal(withoutWalk.exerciseMinutes, 45);
+  assert.equal(withoutWalk.activities.length, 1);
+  const explicit = { ...first, activeCalories: 500, exerciseMinutes: 90 };
+  const preserved = withAddedActivity(explicit, date, gym, time);
+  assert.equal(preserved.activeCalories, 500);
+  assert.equal(preserved.exerciseMinutes, 90);
+});
+
+test("Apple Health authoritative totals are never inflated by manually adding activities", () => {
+  const date = "2026-10-11";
+  const time = "2026-10-11T10:00:00.000Z";
+  const health = {
+    date, steps: 12000, activeCalories: 500, exerciseMinutes: 60,
+    activities: [{ id: "walk", name: "Walk", minutes: 30, calories: 200 }],
+    updatedAt: time, source: "apple-health-shortcut",
+  };
+  const cycling = { id: "cycling", name: "Cycling", minutes: 20, calories: 150 };
+  const added = withAddedActivity(health, date, cycling, time);
+  assert.equal(added.activeCalories, 500);
+  assert.equal(added.exerciseMinutes, 60);
+  const removed = withRemovedActivity(added, "cycling", time);
+  assert.equal(removed.activeCalories, 500);
+  assert.equal(removed.exerciseMinutes, 60);
 });
