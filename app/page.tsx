@@ -418,7 +418,9 @@ export default function Home() {
     try {
       await eraseState();
       setState(emptyState);
-      flash("success", "All Dayframe data was erased from this device.");
+      setOpenAIKey("");
+      setKeyConfigured(false);
+      flash("success", "All Dayframe data and the saved photo-analysis key were erased on this device.");
     } catch (error) { flash("error", error instanceof Error ? error.message : "Data could not be erased."); }
   }
 
@@ -516,7 +518,7 @@ export default function Home() {
           </article>
 
           <article className="surface log-card movement-card"><div className="log-card-title"><span className="entry-icon lime">M</span><div><p className="eyebrow">Movement</p><h2>Totals and activities</h2></div></div>
-            <form className="form-grid three" onSubmit={saveMovement}><label>Steps<input name="steps" type="number" min="0" max="200000" defaultValue={metrics.steps || ""} placeholder="8,000" /></label><label>Active kcal<input name="activeCalories" type="number" min="0" max="10000" defaultValue={metrics.activeCalories || ""} placeholder="420" /></label><label>Exercise min<input name="exerciseMinutes" type="number" min="0" max="1440" defaultValue={metrics.exerciseMinutes || ""} placeholder="45" /></label><button className="primary-button lime-button" type="submit">Save daily totals</button></form>
+            <form className="form-grid three" key={selectedDate} onSubmit={saveMovement}><label>Steps<input name="steps" type="number" min="0" max="200000" defaultValue={metrics.steps || ""} placeholder="8,000" /></label><label>Active kcal<input name="activeCalories" type="number" min="0" max="10000" defaultValue={metrics.activeCalories || ""} placeholder="420" /></label><label>Exercise min<input name="exerciseMinutes" type="number" min="0" max="1440" defaultValue={metrics.exerciseMinutes || ""} placeholder="45" /></label><button className="primary-button lime-button" type="submit">Save daily totals</button></form>
             <div className="form-divider"><span>or add an activity</span></div>
             <form className="activity-form" onSubmit={addActivity}><label>Activity<input name="activityName" placeholder="Walk, gym, football…" required /></label><label>Minutes<input name="activityMinutes" type="number" min="0" max="1440" placeholder="30" /></label><label>Active kcal<input name="activityCalories" type="number" min="0" max="5000" placeholder="180" /></label><button className="secondary-button" type="submit">Add activity</button></form>
             {metrics.activities.length > 0 && <div className="chips">{metrics.activities.map((activity) => <span key={activity.id}>{activity.name} · {activity.minutes}m</span>)}</div>}
