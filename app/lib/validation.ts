@@ -19,6 +19,12 @@ export function suggestedMealTime(dateKey: string, now: Date = new Date()): stri
   return `${dateKey}T${hours}:${minutes}`;
 }
 
+/** AI item lists can be corrected and retained on manual or edited meals. */
+export function parseMealItems(value: FormDataEntryValue | null): string[] {
+  if (typeof value !== "string") return [];
+  return value.split(/[,\n]+/).map((item) => item.trim().slice(0, 100)).filter(Boolean).slice(0, 12);
+}
+
 function record(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
