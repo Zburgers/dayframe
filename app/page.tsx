@@ -492,7 +492,7 @@ export default function Home() {
             {metrics.meals.length === 0 && metrics.activities.length === 0 && !metrics.sleepMinutes ? <div className="empty-state"><span>○</span><p>Nothing logged for this date yet.</p><button onClick={() => setTab("log")}>Log the first thing</button></div> : <div className="entry-list">
               {metrics.sleepMinutes > 0 && <div className="entry-row"><span className="entry-icon indigo">Z</span><div><b>Sleep</b><small>{formatDuration(metrics.sleepMinutes)} ending this day</small></div></div>}
               {metrics.activities.map((activity) => <div className="entry-row" key={activity.id}><span className="entry-icon lime">M</span><div><b>{activity.name}</b><small>{activity.minutes} min · {activity.calories} active kcal</small></div></div>)}
-              {metrics.meals.map((meal) => <div className="entry-row" key={meal.id}><span className="entry-icon coral">F</span><div><b>{meal.name}</b><small>{new Date(meal.eatenAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} · about {meal.calories} kcal</small></div><button className="delete-mini" onClick={() => removeMeal(meal.id)} aria-label={`Remove ${meal.name}`}>×</button></div>)}
+              {metrics.meals.map((meal) => <div className="entry-row" key={meal.id}><span className="entry-icon coral">F</span><div><b>{meal.name}</b><small>{new Date(meal.eatenAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} · about {meal.calories} kcal</small></div><button className="secondary-button" onClick={() => editMeal(meal.id)} aria-label={`Edit ${meal.name}`}>Edit</button><button className="delete-mini" onClick={() => removeMeal(meal.id)} aria-label={`Remove ${meal.name}`}>×</button></div>)}
             </div>}
           </section>
         </>}
@@ -513,26 +513,27 @@ export default function Home() {
             <details className="health-import"><summary>Import an Apple Health summary</summary><p>Paste the JSON created by your iPhone Shortcut. Importing the same date replaces its previous totals.</p><textarea value={healthJson} onChange={(event) => setHealthJson(event.target.value)} placeholder={'{"version":1,"date":"2026-08-04","steps":8421,"activeCalories":516,"exerciseMinutes":48,"activities":[]}'}/><button className="secondary-button" disabled={!healthJson.trim()} onClick={importHealth}>Validate and import</button></details>
           </article>
 
-          <article className="surface log-card meal-card"><div className="log-card-title"><span className="entry-icon coral">F</span><div><p className="eyebrow">Food</p><h2>Photo estimate or manual log</h2></div></div>
+          <article id="food-log" className="surface log-card meal-card"><div className="log-card-title"><span className="entry-icon coral">F</span><div><p className="eyebrow">Food</p><h2>{editingMeal ? "Edit recorded meal" : "Photo estimate or manual log"}</h2></div></div>
+            {editingMeal && <button className="secondary-button" type="button" onClick={cancelMealEdit}>Cancel editing</button>}
             <div className={`photo-zone ${mealPreview ? "has-photo" : ""}`}>
               {/* The source is a short-lived local object URL, so Next image optimization is intentionally not used. */}
               {/* eslint-disable-next-line @next/next/no-img-element */}
               {mealPreview ? <img src={mealPreview} alt="Selected meal preview" /> : <><span>＋</span><b>Take a meal photo</b><small>Processed for an estimate, never saved</small></>}
-              <input aria-label="Take or choose a meal photo" type="file" accept="image/*" capture="environment" onChange={selectMealPhoto} />
+              <input ref={mealInput} aria-label="Take or choose a meal photo" type="file" accept="image/*" capture="environment" onChange={selectMealPhoto} />
             </div>
             {mealPreview && <button className="primary-button coral-button" type="button" disabled={analyzing} onClick={analyzeMeal}>{analyzing ? "Estimating your meal…" : "Estimate calories from photo"}</button>}
             {mealError && <p className="inline-error">{mealError}</p>}
             <p className="privacy-line"><span>✓</span> Photo bytes are discarded after this request. Review every estimate before saving.</p>
             <div className="form-divider"><span>{mealEstimate ? "Review the estimate" : "meal details"}</span></div>
-            <form className="form-grid meal-form" onSubmit={saveMeal} key={mealEstimate ? JSON.stringify(mealEstimate) : "manual"}>
-              <label className="wide">Meal name<input name="mealName" defaultValue={mealEstimate?.name ?? ""} placeholder="Paneer rice bowl" required /></label>
-              <label>Time<input name="eatenAt" type="datetime-local" defaultValue={`${selectedDate}T${new Date().toTimeString().slice(0, 5)}`} required /></label>
-              <label>Calories<input name="mealCalories" type="number" min="0" max="5000" defaultValue={mealEstimate?.calories ?? ""} placeholder="650" required /></label>
-              <label>Protein (g)<input name="mealProtein" type="number" min="0" max="500" step="0.1" defaultValue={mealEstimate?.proteinGrams ?? ""} /></label>
-              <label>Carbs (g)<input name="mealCarbs" type="number" min="0" max="800" step="0.1" defaultValue={mealEstimate?.carbsGrams ?? ""} /></label>
-              <label>Fat (g)<input name="mealFat" type="number" min="0" max="500" step="0.1" defaultValue={mealEstimate?.fatGrams ?? ""} /></label>
+            <form className="form-grid meal-form" onSubmit={saveMeal} key={`${selectedDate}-${editingMeal?.id ?? "new"}-${mealEstimate ? JSON.stringify(mealEstimate) : "manual"}`}>
+              <label className="wide">Meal name<input name="mealName" defaultValue={mealEstimate?.name ?? editingMeal?.name ?? ""} placeholder="Paneer rice bowl" required /></label>
+              <label>Time<input name="eatenAt" type="datetime-local" defaultValue={editingMeal ? localDateTimeValue(editingMeal.eatenAt) : suggestedMealTime(selectedDate)} required /></label>
+              <label>Calories<input name="mealCalories" type="number" min="0" max="5000" defaultValue={mealEstimate?.calories ?? editingMeal?.calories ?? ""} placeholder="650" required /></label>
+              <label>Protein (g)<input name="mealProtein" type="number" min="0" max="500" step="0.1" defaultValue={mealEstimate?.proteinGrams ?? editingMeal?.proteinGrams ?? ""} /></label>
+              <label>Carbs (g)<input name="mealCarbs" type="number" min="0" max="800" step="0.1" defaultValue={mealEstimate?.carbsGrams ?? editingMeal?.carbsGrams ?? ""} /></label>
+              <label>Fat (g)<input name="mealFat" type="number" min="0" max="500" step="0.1" defaultValue={mealEstimate?.fatGrams ?? editingMeal?.fatGrams ?? ""} /></label>
               {mealEstimate && <div className="estimate-note wide"><b>{mealEstimate.confidence} confidence</b><p>{mealEstimate.note}</p>{mealEstimate.items.length > 0 && <small>{mealEstimate.items.join(" · ")}</small>}</div>}
-              <button className="primary-button coral-button" type="submit">Save meal and discard photo</button>
+              <button className="primary-button coral-button" type="submit">{editingMeal ? "Update meal" : "Save meal"} and discard photo</button>
             </form>
           </article>
         </section>}
