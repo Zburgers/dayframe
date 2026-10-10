@@ -486,6 +486,7 @@ export default function Home() {
   })();
 
   if (!loaded) return <main className="loading-screen"><div className="brand-mark">D</div><p>Opening your day…</p></main>;
+  if (!canPersist) return <main className="loading-screen"><div className="brand-mark">D</div><p>Dayframe could not read your saved history. To protect it, logging is paused.</p><button className="secondary-button" onClick={() => window.location.reload()}>Retry opening Dayframe</button></main>;
 
   return (
     <main className="app-shell">
