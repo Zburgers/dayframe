@@ -2,6 +2,7 @@
 
 import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { completeness, dayMetrics, formatDuration, localDateKey, sevenDayAverage } from "./lib/metrics";
+import { withAddedActivity, withRemovedActivity } from "./lib/activity";
 import { eraseState, normalizeState, readOpenAIKey, readState, writeOpenAIKey, writeState } from "./lib/storage";
 import { Activity, DayframeState, MealEstimate, MovementDay, emptyState } from "./lib/types";
 import { isDayframeBackup, localDateTimeValue, parseMealAmount, parseMealItems, suggestedMealTime } from "./lib/validation";
@@ -184,18 +185,27 @@ export default function Home() {
     const name = String(form.get("activityName") ?? "").trim();
     if (!name) return;
     const activity: Activity = { id: id(), name, minutes: Math.round(number(form.get("activityMinutes"))), calories: Math.round(number(form.get("activityCalories"))) };
-    const existing = state.movementDays.find((day) => day.date === selectedDate);
-    upsertMovement({
-      date: selectedDate,
-      steps: existing?.steps ?? 0,
-      activeCalories: existing?.activeCalories ?? activity.calories,
-      exerciseMinutes: existing?.exerciseMinutes ?? activity.minutes,
-      source: existing?.source ?? "manual",
-      activities: [...(existing?.activities ?? []), activity],
-      updatedAt: new Date().toISOString(),
+    const date = selectedDate;
+    const updatedAt = new Date().toISOString();
+    setState((current) => {
+      const existing = current.movementDays.find((day) => day.date === date);
+      const next = withAddedActivity(existing, date, activity, updatedAt);
+      return { ...current, movementDays: [...current.movementDays.filter((day) => day.date !== date), next] };
     });
     event.currentTarget.reset();
     flash("success", `${name} added.`);
+  }
+
+  function removeActivity(activityId: string) {
+    const activity = metrics.activities.find((item) => item.id === activityId);
+    if (!activity || !window.confirm(`Remove "${activity.name}" from this day?`)) return;
+    const date = selectedDate;
+    const updatedAt = new Date().toISOString();
+    setState((current) => ({
+      ...current,
+      movementDays: current.movementDays.map((day) => day.date === date ? withRemovedActivity(day, activityId, updatedAt) : day),
+    }));
+    flash("success", "Activity removed.");
   }
 
   function startSleep() {
@@ -521,7 +531,7 @@ export default function Home() {
             <form className="form-grid three" key={selectedDate} onSubmit={saveMovement}><label>Steps<input name="steps" type="number" min="0" max="200000" defaultValue={metrics.steps || ""} placeholder="8,000" /></label><label>Active kcal<input name="activeCalories" type="number" min="0" max="10000" defaultValue={metrics.activeCalories || ""} placeholder="420" /></label><label>Exercise min<input name="exerciseMinutes" type="number" min="0" max="1440" defaultValue={metrics.exerciseMinutes || ""} placeholder="45" /></label><button className="primary-button lime-button" type="submit">Save daily totals</button></form>
             <div className="form-divider"><span>or add an activity</span></div>
             <form className="activity-form" onSubmit={addActivity}><label>Activity<input name="activityName" placeholder="Walk, gym, football…" required /></label><label>Minutes<input name="activityMinutes" type="number" min="0" max="1440" placeholder="30" /></label><label>Active kcal<input name="activityCalories" type="number" min="0" max="5000" placeholder="180" /></label><button className="secondary-button" type="submit">Add activity</button></form>
-            {metrics.activities.length > 0 && <div className="chips">{metrics.activities.map((activity) => <span key={activity.id}>{activity.name} · {activity.minutes}m</span>)}</div>}
+            {metrics.activities.length > 0 && <div className="chips">{metrics.activities.map((activity) => <span key={activity.id}>{activity.name} · {activity.minutes}m <button type="button" onClick={() => removeActivity(activity.id)} aria-label={`Remove ${activity.name}`} title={`Remove ${activity.name}`}>×</button></span>)}</div>}
             <details className="health-import"><summary>Import an Apple Health summary</summary><p>Paste the JSON created by your iPhone Shortcut. Importing the same date replaces its previous totals.</p><textarea value={healthJson} onChange={(event) => setHealthJson(event.target.value)} placeholder={'{"version":1,"date":"2026-08-04","steps":8421,"activeCalories":516,"exerciseMinutes":48,"activities":[]}'}/><button className="secondary-button" disabled={!healthJson.trim()} onClick={importHealth}>Validate and import</button></details>
           </article>
 
