@@ -85,6 +85,7 @@ export default function Home() {
   const today = localDateKey(new Date());
   const [state, setState] = useState<DayframeState>(emptyState);
   const [loaded, setLoaded] = useState(false);
+  const [canPersist, setCanPersist] = useState(false);
   const [tab, setTab] = useState<Tab>("today");
   const [selectedDate, setSelectedDate] = useState(today);
   const [notice, setNotice] = useState<Notice>(null);
@@ -103,16 +104,30 @@ export default function Home() {
   const restoreInput = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    Promise.all([readState(), readOpenAIKey()])
-      .then(([stored, savedKey]) => { setState(stored); setOpenAIKey(savedKey); setKeyConfigured(Boolean(savedKey)); })
-      .catch(() => setNotice({ kind: "error", message: "Local storage could not be opened." }))
-      .finally(() => setLoaded(true));
+    // The encryption/API-key record is independent from health history. A key
+    // read failure must never cause an empty history to overwrite valid data.
+    let active = true;
+    Promise.allSettled([readState(), readOpenAIKey()]).then(([history, key]) => {
+      if (!active) return;
+      if (history.status === "fulfilled") {
+        setState(history.value);
+        setCanPersist(true);
+      } else {
+        setNotice({ kind: "error", message: "Local history could not be loaded. No changes will be saved until storage is available." });
+      }
+      if (key.status === "fulfilled") {
+        setOpenAIKey(key.value);
+        setKeyConfigured(Boolean(key.value));
+      }
+      setLoaded(true);
+    });
+    return () => { active = false; };
   }, []);
 
   useEffect(() => {
-    if (!loaded) return;
+    if (!canPersist) return;
     writeState(state).catch(() => setNotice({ kind: "error", message: "A change could not be saved on this device." }));
-  }, [state, loaded]);
+  }, [state, canPersist]);
 
   useEffect(() => () => { if (mealPreview) URL.revokeObjectURL(mealPreview); }, [mealPreview]);
   useEffect(() => () => mealRequest.current?.abort(), []);
