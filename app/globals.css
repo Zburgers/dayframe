@@ -104,6 +104,9 @@ h1 em { color: var(--indigo); font-family: Georgia, serif; font-weight: 400; }
 .entry-icon { display: grid; flex: 0 0 auto; place-items: center; width: 38px; height: 38px; border-radius: 12px; color: var(--ink); font-size: 11px; font-weight: 800; }
 .entry-icon.indigo { background: var(--indigo-soft); color: var(--indigo); }.entry-icon.lime { background: var(--lime-soft); color: #648020; }.entry-icon.coral { background: var(--coral-soft); color: #bd5d4a; }
 .entry-row div { flex: 1; }.entry-row b, .entry-row small { display: block; }.entry-row b { font-size: 13px; }.entry-row small { margin-top: 3px; color: var(--muted); font-size: 11px; }
+.entry-row .secondary-button { min-height: 36px; padding: 0 10px; flex: 0 0 auto; }
+.entry-row > div { min-width: 0; }
+.entry-row b, .entry-row small { overflow-wrap: anywhere; }
 .delete-mini { width: 30px; height: 30px; border: 0; border-radius: 50%; background: transparent; color: #a7aaa5; cursor: pointer; font-size: 18px; }.delete-mini:hover { background: #f4ddd8; color: #a84a3e; }
 .empty-state { display: grid; justify-items: center; padding: 46px 20px 20px; color: var(--muted); text-align: center; }.empty-state span { font-size: 28px; }.empty-state p { margin: 10px 0 14px; font-size: 13px; }.empty-state button { border: 0; border-bottom: 1px solid; background: transparent; color: var(--ink); cursor: pointer; font-size: 12px; font-weight: 700; }
 
@@ -132,6 +135,8 @@ textarea { min-height: 105px; resize: vertical; line-height: 1.5; }
 .form-divider { display: flex; align-items: center; gap: 12px; margin: 24px 0; color: #999e98; font-size: 9px; text-transform: uppercase; letter-spacing: .13em; }.form-divider::before,.form-divider::after { content: ""; height: 1px; flex: 1; background: var(--line); }
 .activity-form { display: grid; grid-template-columns: 1.6fr .7fr .7fr; gap: 9px; }.activity-form button { grid-column: 1 / -1; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 15px; }.chips span { padding: 6px 9px; border-radius: 999px; background: var(--lime-soft); color: #526b16; font-size: 10px; }
+.chips button { min-width: 28px; min-height: 28px; margin-left: 4px; border: 0; border-radius: 50%; background: transparent; color: #526b16; font-size: 15px; cursor: pointer; }
+.chips button:hover, .chips button:focus-visible { background: #d6e5b2; }
 .health-import p { color: var(--muted); font-size: 11px; line-height: 1.6; }.health-import textarea { font-family: var(--font-geist-mono), monospace; font-size: 10px; }.health-import button { width: 100%; margin-top: 10px; }
 
 .photo-zone { position: relative; min-height: 235px; overflow: hidden; display: grid; place-items: center; align-content: center; gap: 7px; border: 1.5px dashed #d7b4ac; border-radius: 18px; background: linear-gradient(145deg, #fffaf7, #fae8e3); color: #9c5b4e; text-align: center; }

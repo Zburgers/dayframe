@@ -26,4 +26,4 @@ jobs:
         run: npm ci
 
       - name: Run build, rendered HTML tests, lint, and artifact validation
-        run: npm test && npm run lint && npm run validate:artifact
+        run: npm test && npx tsc --noEmit && npm run lint && npm run validate:artifact

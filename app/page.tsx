@@ -2,8 +2,10 @@
 
 import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { completeness, dayMetrics, formatDuration, localDateKey, sevenDayAverage } from "./lib/metrics";
+import { withAddedActivity, withRemovedActivity } from "./lib/activity";
 import { eraseState, normalizeState, readOpenAIKey, readState, writeOpenAIKey, writeState } from "./lib/storage";
 import { Activity, DayframeState, MealEstimate, MovementDay, emptyState } from "./lib/types";
+import { isDayframeBackup, localDateTimeValue, parseMealAmount, parseMealItems, suggestedMealTime, suggestedSleepRange } from "./lib/validation";
 
 type Tab = "today" | "log" | "history" | "settings";
 type Notice = { kind: "success" | "error"; message: string } | null;
@@ -13,11 +15,6 @@ const id = () => globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.rand
 
 function dateLabel(date: string, options: Intl.DateTimeFormatOptions = { weekday: "long", month: "long", day: "numeric" }) {
   return new Intl.DateTimeFormat("en-IN", options).format(new Date(`${date}T12:00:00`));
-}
-
-function dateTimeInput(date: Date) {
-  const shifted = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
-  return shifted.toISOString().slice(0, 16);
 }
 
 async function normalizeMealImage(file: File): Promise<File> {
@@ -88,6 +85,7 @@ export default function Home() {
   const today = localDateKey(new Date());
   const [state, setState] = useState<DayframeState>(emptyState);
   const [loaded, setLoaded] = useState(false);
+  const [canPersist, setCanPersist] = useState(false);
   const [tab, setTab] = useState<Tab>("today");
   const [selectedDate, setSelectedDate] = useState(today);
   const [notice, setNotice] = useState<Notice>(null);
@@ -95,25 +93,47 @@ export default function Home() {
   const [mealFile, setMealFile] = useState<File | null>(null);
   const [mealPreview, setMealPreview] = useState<string | null>(null);
   const [mealEstimate, setMealEstimate] = useState<MealEstimate | null>(null);
+  const [editingMealId, setEditingMealId] = useState<string | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
+  const mealRequest = useRef<AbortController | null>(null);
+  const photoSelectionId = useRef(0);
+  const mealInput = useRef<HTMLInputElement>(null);
   const [mealError, setMealError] = useState("");
   const [openAIKey, setOpenAIKey] = useState("");
   const [keyConfigured, setKeyConfigured] = useState(false);
   const restoreInput = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    Promise.all([readState(), readOpenAIKey()])
-      .then(([stored, savedKey]) => { setState(stored); setOpenAIKey(savedKey); setKeyConfigured(Boolean(savedKey)); })
-      .catch(() => setNotice({ kind: "error", message: "Local storage could not be opened." }))
-      .finally(() => setLoaded(true));
+    // The encryption/API-key record is independent from health history. A key
+    // read failure must never cause an empty history to overwrite valid data.
+    let active = true;
+    Promise.allSettled([readState(), readOpenAIKey()]).then(([history, key]) => {
+      if (!active) return;
+      if (history.status === "fulfilled") {
+        setState(history.value);
+        setCanPersist(true);
+      } else {
+        setNotice({ kind: "error", message: "Local history could not be loaded. No changes will be saved until storage is available." });
+      }
+      if (key.status === "fulfilled") {
+        setOpenAIKey(key.value);
+        setKeyConfigured(Boolean(key.value));
+      }
+      setLoaded(true);
+    });
+    return () => { active = false; };
   }, []);
 
   useEffect(() => {
-    if (!loaded) return;
+    if (!canPersist) return;
     writeState(state).catch(() => setNotice({ kind: "error", message: "A change could not be saved on this device." }));
-  }, [state, loaded]);
+  }, [state, canPersist]);
 
   useEffect(() => () => { if (mealPreview) URL.revokeObjectURL(mealPreview); }, [mealPreview]);
+  useEffect(() => () => mealRequest.current?.abort(), []);
+  useEffect(() => {
+    if (tab === "log" && editingMealId) document.getElementById("food-log")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [tab, editingMealId]);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -128,6 +148,7 @@ export default function Home() {
   }, []);
 
   const metrics = useMemo(() => dayMetrics(state, selectedDate), [state, selectedDate]);
+  const editingMeal = state.meals.find((meal) => meal.id === editingMealId) ?? null;
   const openSleep = state.sleepSessions.find((session) => !session.endedAt);
   const averageSleep = sevenDayAverage(state, selectedDate, "sleep");
   const averageSteps = sevenDayAverage(state, selectedDate, "steps");
@@ -174,18 +195,27 @@ export default function Home() {
     const name = String(form.get("activityName") ?? "").trim();
     if (!name) return;
     const activity: Activity = { id: id(), name, minutes: Math.round(number(form.get("activityMinutes"))), calories: Math.round(number(form.get("activityCalories"))) };
-    const existing = state.movementDays.find((day) => day.date === selectedDate);
-    upsertMovement({
-      date: selectedDate,
-      steps: existing?.steps ?? 0,
-      activeCalories: existing?.activeCalories ?? activity.calories,
-      exerciseMinutes: existing?.exerciseMinutes ?? activity.minutes,
-      source: existing?.source ?? "manual",
-      activities: [...(existing?.activities ?? []), activity],
-      updatedAt: new Date().toISOString(),
+    const date = selectedDate;
+    const updatedAt = new Date().toISOString();
+    setState((current) => {
+      const existing = current.movementDays.find((day) => day.date === date);
+      const next = withAddedActivity(existing, date, activity, updatedAt);
+      return { ...current, movementDays: [...current.movementDays.filter((day) => day.date !== date), next] };
     });
     event.currentTarget.reset();
     flash("success", `${name} added.`);
+  }
+
+  function removeActivity(activityId: string) {
+    const activity = metrics.activities.find((item) => item.id === activityId);
+    if (!activity || !window.confirm(`Remove "${activity.name}" from this day?`)) return;
+    const date = selectedDate;
+    const updatedAt = new Date().toISOString();
+    setState((current) => ({
+      ...current,
+      movementDays: current.movementDays.map((day) => day.date === date ? withRemovedActivity(day, activityId, updatedAt) : day),
+    }));
+    flash("success", "Activity removed.");
   }
 
   function startSleep() {
@@ -205,16 +235,26 @@ export default function Home() {
   function addManualSleep(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
-    const startedAt = new Date(String(form.get("sleepStart"))).toISOString();
-    const endedAt = new Date(String(form.get("sleepEnd"))).toISOString();
-    if (new Date(endedAt) <= new Date(startedAt) || new Date(endedAt).getTime() - new Date(startedAt).getTime() > 24 * 60 * 60 * 1000) {
+    const start = new Date(String(form.get("sleepStart") ?? ""));
+    const end = new Date(String(form.get("sleepEnd") ?? ""));
+    const duration = end.getTime() - start.getTime();
+    if (!Number.isFinite(duration) || duration <= 0 || duration > 24 * 60 * 60 * 1000) {
       flash("error", "Sleep end must be after the start and within 24 hours.");
       return;
     }
+    const startedAt = start.toISOString();
+    const endedAt = end.toISOString();
     setState((current) => ({ ...current, sleepSessions: [...current.sleepSessions, { id: id(), startedAt, endedAt }] }));
     setSelectedDate(localDateKey(endedAt));
     event.currentTarget.reset();
     flash("success", "Sleep session added.");
+  }
+
+  function removeSleep(sleepId: string) {
+    const session = state.sleepSessions.find((entry) => entry.id === sleepId);
+    if (!session || !window.confirm("Remove this recorded sleep session?")) return;
+    setState((current) => ({ ...current, sleepSessions: current.sleepSessions.filter((entry) => entry.id !== sleepId) }));
+    flash("success", "Sleep session removed.");
   }
 
   function importHealth() {
@@ -246,57 +286,137 @@ export default function Home() {
   async function selectMealPhoto(event: ChangeEvent<HTMLInputElement>) {
     const selected = event.target.files?.[0];
     if (!selected) return;
-    setMealError("");
+    event.target.value = "";
+    const selection = ++photoSelectionId.current;
+    mealRequest.current?.abort();
+    mealRequest.current = null;
+    setAnalyzing(false);
+    setMealFile(null);
+    setMealPreview(null);
     setMealEstimate(null);
+    setMealError("");
     try {
       const prepared = await normalizeMealImage(selected);
-      if (mealPreview) URL.revokeObjectURL(mealPreview);
+      if (selection !== photoSelectionId.current) return;
       setMealFile(prepared);
       setMealPreview(URL.createObjectURL(prepared));
     } catch (error) {
-      setMealError(error instanceof Error ? error.message : "That image could not be read.");
+      if (selection === photoSelectionId.current) {
+        setMealError(error instanceof Error ? error.message : "That image could not be read.");
+      }
     }
   }
 
   async function analyzeMeal() {
     if (!mealFile) return;
+    mealRequest.current?.abort();
+    const controller = new AbortController();
+    mealRequest.current = controller;
     setAnalyzing(true);
+    setMealEstimate(null);
     setMealError("");
     try {
       const form = new FormData();
       form.append("image", mealFile);
-      const response = await fetch("/api/analyze-meal", { method: "POST", headers: openAIKey ? { "x-dayframe-openai-key": openAIKey } : undefined, body: form });
-      const payload = await response.json() as { estimate?: MealEstimate; error?: string };
+      const response = await fetch("/api/analyze-meal", {
+        method: "POST",
+        headers: openAIKey ? { "x-dayframe-openai-key": openAIKey } : undefined,
+        body: form,
+        signal: controller.signal,
+      });
+      const payload = await response.json().catch(() => ({ error: "The analysis service did not return a valid response." })) as { estimate?: MealEstimate; error?: string };
+      if (controller.signal.aborted) return;
       if (!response.ok || !payload.estimate) throw new Error(payload.error || "Could not analyze that photo.");
       setMealEstimate(payload.estimate);
     } catch (error) {
-      setMealError(error instanceof Error ? error.message : "Photo analysis is unavailable.");
+      if (!controller.signal.aborted) {
+        setMealError(error instanceof Error ? error.message : "Photo analysis is unavailable.");
+      }
     } finally {
-      setAnalyzing(false);
+      if (mealRequest.current === controller) {
+        mealRequest.current = null;
+        setAnalyzing(false);
+      }
     }
+  }
+
+  function editMeal(mealId: string) {
+    if (!state.meals.some((meal) => meal.id === mealId)) return;
+    photoSelectionId.current += 1;
+    mealRequest.current?.abort();
+    mealRequest.current = null;
+    setAnalyzing(false);
+    setMealFile(null);
+    setMealPreview(null);
+    setMealEstimate(null);
+    setMealError("");
+    setEditingMealId(mealId);
+    setTab("log");
+  }
+
+  function cancelMealEdit() {
+    photoSelectionId.current += 1;
+    mealRequest.current?.abort();
+    mealRequest.current = null;
+    setAnalyzing(false);
+    setEditingMealId(null);
+    setMealEstimate(null);
+    setMealFile(null);
+    setMealPreview(null);
+    setMealError("");
+    if (mealInput.current) mealInput.current.value = "";
   }
 
   function saveMeal(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     const name = String(form.get("mealName") ?? "").trim();
-    if (!name) return;
-    const eatenAtRaw = String(form.get("eatenAt") || `${selectedDate}T12:00`);
-    setState((current) => ({ ...current, meals: [...current.meals, {
-      id: id(), eatenAt: new Date(eatenAtRaw).toISOString(), name,
-      calories: Math.round(number(form.get("mealCalories"))), proteinGrams: number(form.get("mealProtein")),
-      carbsGrams: number(form.get("mealCarbs")), fatGrams: number(form.get("mealFat")),
-      source: mealEstimate ? "photo-estimate" : "manual", confidence: mealEstimate?.confidence,
-      items: mealEstimate?.items, note: mealEstimate?.note,
-    }] }));
-    if (mealPreview) URL.revokeObjectURL(mealPreview);
-    setMealPreview(null); setMealFile(null); setMealEstimate(null); setMealError("");
+    const eatenAtRaw = String(form.get("eatenAt") ?? "");
+    const eatenAtDate = new Date(eatenAtRaw);
+    const calories = parseMealAmount(form.get("mealCalories"), 5000, true);
+    const proteinGrams = parseMealAmount(form.get("mealProtein"), 500);
+    const carbsGrams = parseMealAmount(form.get("mealCarbs"), 800);
+    const fatGrams = parseMealAmount(form.get("mealFat"), 500);
+    if (!name || !Number.isFinite(eatenAtDate.getTime()) ||
+        calories === null || proteinGrams === null || carbsGrams === null || fatGrams === null) {
+      flash("error", "Enter a valid meal name, date, calories, and nonnegative macros.");
+      return;
+    }
+    const previous = editingMeal;
+    const updated = {
+      id: previous?.id ?? id(), eatenAt: eatenAtDate.toISOString(), name: name.slice(0, 100),
+      calories: Math.round(calories), proteinGrams, carbsGrams, fatGrams,
+      source: mealEstimate ? "photo-estimate" as const : previous?.source ?? "manual" as const,
+      confidence: mealEstimate?.confidence ?? previous?.confidence,
+      items: parseMealItems(form.get("mealItems")),
+      note: String(form.get("mealNote") ?? "").trim().slice(0, 500),
+    };
+    setState((current) => ({
+      ...current,
+      meals: previous
+        ? current.meals.map((meal) => meal.id === previous.id ? updated : meal)
+        : [...current.meals, updated],
+    }));
+    photoSelectionId.current += 1;
+    mealRequest.current?.abort();
+    mealRequest.current = null;
+    setAnalyzing(false);
+    setMealPreview(null);
+    setMealFile(null);
+    setMealEstimate(null);
+    setMealError("");
+    setEditingMealId(null);
+    setSelectedDate(localDateKey(updated.eatenAt));
+    if (mealInput.current) mealInput.current.value = "";
     event.currentTarget.reset();
-    flash("success", `${name} saved. The photo was discarded.`);
+    flash("success", `${name} ${previous ? "updated" : "saved"} on this device.`);
   }
 
   function removeMeal(mealId: string) {
-    setState((current) => ({ ...current, meals: current.meals.filter((meal) => meal.id !== mealId) }));
+    const meal = state.meals.find((item) => item.id === mealId);
+    if (!meal || !window.confirm(`Remove "${meal.name}" from your journal?`)) return;
+    setState((current) => ({ ...current, meals: current.meals.filter((item) => item.id !== mealId) }));
+    if (editingMealId === mealId) cancelMealEdit();
     flash("success", "Meal removed.");
   }
 
@@ -312,7 +432,9 @@ export default function Home() {
     const file = event.target.files?.[0];
     if (!file) return;
     try {
-      const restored = normalizeState(JSON.parse(await file.text()));
+      const parsed: unknown = JSON.parse(await file.text());
+      if (!isDayframeBackup(parsed)) throw new Error("Invalid backup");
+      const restored = normalizeState(parsed);
       if (!window.confirm("Replace all current Dayframe data with this backup?")) return;
       setState(restored);
       flash("success", "Backup restored on this device.");
@@ -326,7 +448,9 @@ export default function Home() {
     try {
       await eraseState();
       setState(emptyState);
-      flash("success", "All Dayframe data was erased from this device.");
+      setOpenAIKey("");
+      setKeyConfigured(false);
+      flash("success", "All Dayframe data and the saved photo-analysis key were erased on this device.");
     } catch (error) { flash("error", error instanceof Error ? error.message : "Data could not be erased."); }
   }
 
@@ -362,6 +486,7 @@ export default function Home() {
   })();
 
   if (!loaded) return <main className="loading-screen"><div className="brand-mark">D</div><p>Opening your day…</p></main>;
+  if (!canPersist) return <main className="loading-screen"><div className="brand-mark">D</div><p>Dayframe could not read your saved history. To protect it, logging is paused.</p><button className="secondary-button" onClick={() => window.location.reload()}>Retry opening Dayframe</button></main>;
 
   return (
     <main className="app-shell">
@@ -408,9 +533,9 @@ export default function Home() {
 
           <section className="surface timeline"><div className="section-heading"><div><p className="eyebrow">Recorded today</p><h2>Your entries</h2></div><button className="text-button" onClick={() => setTab("log")}>Add entry</button></div>
             {metrics.meals.length === 0 && metrics.activities.length === 0 && !metrics.sleepMinutes ? <div className="empty-state"><span>○</span><p>Nothing logged for this date yet.</p><button onClick={() => setTab("log")}>Log the first thing</button></div> : <div className="entry-list">
-              {metrics.sleepMinutes > 0 && <div className="entry-row"><span className="entry-icon indigo">Z</span><div><b>Sleep</b><small>{formatDuration(metrics.sleepMinutes)} ending this day</small></div></div>}
+              {state.sleepSessions.filter((session) => session.endedAt && localDateKey(session.endedAt) === selectedDate).map((session) => <div className="entry-row" key={session.id}><span className="entry-icon indigo">Z</span><div><b>Sleep</b><small>{formatDuration(Math.max(0, Math.round((new Date(session.endedAt!).getTime() - new Date(session.startedAt).getTime()) / 60000)))} ending this day</small></div><button className="delete-mini" onClick={() => removeSleep(session.id)} aria-label="Remove sleep session">×</button></div>)}
               {metrics.activities.map((activity) => <div className="entry-row" key={activity.id}><span className="entry-icon lime">M</span><div><b>{activity.name}</b><small>{activity.minutes} min · {activity.calories} active kcal</small></div></div>)}
-              {metrics.meals.map((meal) => <div className="entry-row" key={meal.id}><span className="entry-icon coral">F</span><div><b>{meal.name}</b><small>{new Date(meal.eatenAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} · about {meal.calories} kcal</small></div><button className="delete-mini" onClick={() => removeMeal(meal.id)} aria-label={`Remove ${meal.name}`}>×</button></div>)}
+              {metrics.meals.map((meal) => <div className="entry-row" key={meal.id}><span className="entry-icon coral">F</span><div><b>{meal.name}</b><small>{new Date(meal.eatenAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} · about {meal.calories} kcal</small></div><button className="secondary-button" onClick={() => editMeal(meal.id)} aria-label={`Edit ${meal.name}`}>Edit</button><button className="delete-mini" onClick={() => removeMeal(meal.id)} aria-label={`Remove ${meal.name}`}>×</button></div>)}
             </div>}
           </section>
         </>}
@@ -420,37 +545,40 @@ export default function Home() {
 
           <article className="surface log-card sleep-card"><div className="log-card-title"><span className="entry-icon indigo">Z</span><div><p className="eyebrow">Sleep</p><h2>{openSleep ? "Sleep timer is running" : "Rest, recorded simply"}</h2></div></div>
             <button className="primary-button indigo-button" onClick={openSleep ? finishSleep : startSleep}>{openSleep ? "I’m awake — finish session" : "Going to sleep now"}</button>
-            <details><summary>Add or correct times manually</summary><form className="form-grid" onSubmit={addManualSleep}><label>Went to sleep<input name="sleepStart" type="datetime-local" defaultValue={dateTimeInput(new Date(`${selectedDate}T23:00:00`))} required /></label><label>Woke up<input name="sleepEnd" type="datetime-local" defaultValue={dateTimeInput(new Date(new Date(`${selectedDate}T07:00:00`).getTime() + (selectedDate === today ? 0 : 86_400_000)))} required /></label><button className="secondary-button" type="submit">Save sleep</button></form></details>
+            <details><summary>Add or correct times manually</summary><form className="form-grid" key={`sleep-${selectedDate}`} onSubmit={addManualSleep}><label>Went to sleep<input name="sleepStart" type="datetime-local" defaultValue={suggestedSleepRange(selectedDate).start} required /></label><label>Woke up<input name="sleepEnd" type="datetime-local" defaultValue={suggestedSleepRange(selectedDate).end} required /></label><button className="secondary-button" type="submit">Save sleep</button></form></details>
           </article>
 
           <article className="surface log-card movement-card"><div className="log-card-title"><span className="entry-icon lime">M</span><div><p className="eyebrow">Movement</p><h2>Totals and activities</h2></div></div>
-            <form className="form-grid three" onSubmit={saveMovement}><label>Steps<input name="steps" type="number" min="0" max="200000" defaultValue={metrics.steps || ""} placeholder="8,000" /></label><label>Active kcal<input name="activeCalories" type="number" min="0" max="10000" defaultValue={metrics.activeCalories || ""} placeholder="420" /></label><label>Exercise min<input name="exerciseMinutes" type="number" min="0" max="1440" defaultValue={metrics.exerciseMinutes || ""} placeholder="45" /></label><button className="primary-button lime-button" type="submit">Save daily totals</button></form>
+            <form className="form-grid three" key={selectedDate} onSubmit={saveMovement}><label>Steps<input name="steps" type="number" min="0" max="200000" defaultValue={metrics.steps || ""} placeholder="8,000" /></label><label>Active kcal<input name="activeCalories" type="number" min="0" max="10000" defaultValue={metrics.activeCalories || ""} placeholder="420" /></label><label>Exercise min<input name="exerciseMinutes" type="number" min="0" max="1440" defaultValue={metrics.exerciseMinutes || ""} placeholder="45" /></label><button className="primary-button lime-button" type="submit">Save daily totals</button></form>
             <div className="form-divider"><span>or add an activity</span></div>
             <form className="activity-form" onSubmit={addActivity}><label>Activity<input name="activityName" placeholder="Walk, gym, football…" required /></label><label>Minutes<input name="activityMinutes" type="number" min="0" max="1440" placeholder="30" /></label><label>Active kcal<input name="activityCalories" type="number" min="0" max="5000" placeholder="180" /></label><button className="secondary-button" type="submit">Add activity</button></form>
-            {metrics.activities.length > 0 && <div className="chips">{metrics.activities.map((activity) => <span key={activity.id}>{activity.name} · {activity.minutes}m</span>)}</div>}
+            {metrics.activities.length > 0 && <div className="chips">{metrics.activities.map((activity) => <span key={activity.id}>{activity.name} · {activity.minutes}m <button type="button" onClick={() => removeActivity(activity.id)} aria-label={`Remove ${activity.name}`} title={`Remove ${activity.name}`}>×</button></span>)}</div>}
             <details className="health-import"><summary>Import an Apple Health summary</summary><p>Paste the JSON created by your iPhone Shortcut. Importing the same date replaces its previous totals.</p><textarea value={healthJson} onChange={(event) => setHealthJson(event.target.value)} placeholder={'{"version":1,"date":"2026-08-04","steps":8421,"activeCalories":516,"exerciseMinutes":48,"activities":[]}'}/><button className="secondary-button" disabled={!healthJson.trim()} onClick={importHealth}>Validate and import</button></details>
           </article>
 
-          <article className="surface log-card meal-card"><div className="log-card-title"><span className="entry-icon coral">F</span><div><p className="eyebrow">Food</p><h2>Photo estimate or manual log</h2></div></div>
+          <article id="food-log" className="surface log-card meal-card"><div className="log-card-title"><span className="entry-icon coral">F</span><div><p className="eyebrow">Food</p><h2>{editingMeal ? "Edit recorded meal" : "Photo estimate or manual log"}</h2></div></div>
+            {editingMeal && <button className="secondary-button" type="button" onClick={cancelMealEdit}>Cancel editing</button>}
             <div className={`photo-zone ${mealPreview ? "has-photo" : ""}`}>
               {/* The source is a short-lived local object URL, so Next image optimization is intentionally not used. */}
               {/* eslint-disable-next-line @next/next/no-img-element */}
               {mealPreview ? <img src={mealPreview} alt="Selected meal preview" /> : <><span>＋</span><b>Take a meal photo</b><small>Processed for an estimate, never saved</small></>}
-              <input aria-label="Take or choose a meal photo" type="file" accept="image/*" capture="environment" onChange={selectMealPhoto} />
+              <input ref={mealInput} aria-label="Take or choose a meal photo" type="file" accept="image/*" capture="environment" onChange={selectMealPhoto} />
             </div>
             {mealPreview && <button className="primary-button coral-button" type="button" disabled={analyzing} onClick={analyzeMeal}>{analyzing ? "Estimating your meal…" : "Estimate calories from photo"}</button>}
             {mealError && <p className="inline-error">{mealError}</p>}
             <p className="privacy-line"><span>✓</span> Photo bytes are discarded after this request. Review every estimate before saving.</p>
             <div className="form-divider"><span>{mealEstimate ? "Review the estimate" : "meal details"}</span></div>
-            <form className="form-grid meal-form" onSubmit={saveMeal} key={mealEstimate ? JSON.stringify(mealEstimate) : "manual"}>
-              <label className="wide">Meal name<input name="mealName" defaultValue={mealEstimate?.name ?? ""} placeholder="Paneer rice bowl" required /></label>
-              <label>Time<input name="eatenAt" type="datetime-local" defaultValue={`${selectedDate}T${new Date().toTimeString().slice(0, 5)}`} required /></label>
-              <label>Calories<input name="mealCalories" type="number" min="0" max="5000" defaultValue={mealEstimate?.calories ?? ""} placeholder="650" required /></label>
-              <label>Protein (g)<input name="mealProtein" type="number" min="0" max="500" step="0.1" defaultValue={mealEstimate?.proteinGrams ?? ""} /></label>
-              <label>Carbs (g)<input name="mealCarbs" type="number" min="0" max="800" step="0.1" defaultValue={mealEstimate?.carbsGrams ?? ""} /></label>
-              <label>Fat (g)<input name="mealFat" type="number" min="0" max="500" step="0.1" defaultValue={mealEstimate?.fatGrams ?? ""} /></label>
+            <form className="form-grid meal-form" onSubmit={saveMeal} key={`${selectedDate}-${editingMeal?.id ?? "new"}-${mealEstimate ? JSON.stringify(mealEstimate) : "manual"}`}>
+              <label className="wide">Meal name<input name="mealName" defaultValue={mealEstimate?.name ?? editingMeal?.name ?? ""} placeholder="Paneer rice bowl" maxLength={100} required /></label>
+              <label>Time<input name="eatenAt" type="datetime-local" defaultValue={editingMeal ? localDateTimeValue(editingMeal.eatenAt) : suggestedMealTime(selectedDate)} required /></label>
+              <label>Calories<input name="mealCalories" type="number" min="0" max="5000" defaultValue={mealEstimate?.calories ?? editingMeal?.calories ?? ""} placeholder="650" required /></label>
+              <label>Protein (g)<input name="mealProtein" type="number" min="0" max="500" step="0.1" defaultValue={mealEstimate?.proteinGrams ?? editingMeal?.proteinGrams ?? ""} /></label>
+              <label>Carbs (g)<input name="mealCarbs" type="number" min="0" max="800" step="0.1" defaultValue={mealEstimate?.carbsGrams ?? editingMeal?.carbsGrams ?? ""} /></label>
+              <label>Fat (g)<input name="mealFat" type="number" min="0" max="500" step="0.1" defaultValue={mealEstimate?.fatGrams ?? editingMeal?.fatGrams ?? ""} /></label>
+              <label className="wide">Food items (comma separated)<input name="mealItems" maxLength={800} defaultValue={mealEstimate?.items.join(", ") ?? editingMeal?.items?.join(", ") ?? ""} placeholder="Rice, paneer, vegetables" /></label>
+              <label className="wide">Notes and estimate uncertainty<textarea name="mealNote" maxLength={500} defaultValue={mealEstimate?.note ?? editingMeal?.note ?? ""} placeholder="Portion details, sauces, or anything to remember" /></label>
               {mealEstimate && <div className="estimate-note wide"><b>{mealEstimate.confidence} confidence</b><p>{mealEstimate.note}</p>{mealEstimate.items.length > 0 && <small>{mealEstimate.items.join(" · ")}</small>}</div>}
-              <button className="primary-button coral-button" type="submit">Save meal and discard photo</button>
+              <button className="primary-button coral-button" type="submit">{editingMeal ? "Update meal" : "Save meal"} and discard photo</button>
             </form>
           </article>
         </section>}

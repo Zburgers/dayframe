@@ -29,7 +29,9 @@ export async function readState(): Promise<DayframeState> {
   });
 }
 
-export async function writeState(state: DayframeState): Promise<void> {
+let pendingWrite: Promise<void> = Promise.resolve();
+
+async function persistState(state: DayframeState): Promise<void> {
   const db = await openDatabase();
   return new Promise((resolve, reject) => {
     const transaction = db.transaction(STORE, "readwrite");
@@ -43,6 +45,14 @@ export async function writeState(state: DayframeState): Promise<void> {
       reject(transaction.error ?? new Error("Could not save local data"));
     };
   });
+}
+
+// IndexedDB transactions are atomic, but independent writeState calls can
+// otherwise complete out of order when someone logs several meals quickly.
+export function writeState(state: DayframeState): Promise<void> {
+  const next = pendingWrite.catch(() => undefined).then(() => persistState(state));
+  pendingWrite = next;
+  return next;
 }
 
 export async function readOpenAIKey(): Promise<string> {
@@ -68,6 +78,7 @@ export async function writeOpenAIKey(value: string): Promise<void> {
 }
 
 export async function eraseState(): Promise<void> {
+  await pendingWrite.catch(() => undefined);
   await new Promise<void>((resolve, reject) => {
     const request = indexedDB.deleteDatabase(DB_NAME);
     request.onsuccess = () => resolve();
