@@ -19,6 +19,15 @@ export function suggestedMealTime(dateKey: string, now: Date = new Date()): stri
   return `${dateKey}T${hours}:${minutes}`;
 }
 
+/** The selected date is the day of waking, so the default night starts the previous day. */
+export function suggestedSleepRange(wakeDate: string): { start: string; end: string } {
+  const end = new Date(`${wakeDate}T07:00:00`);
+  const start = new Date(end);
+  start.setDate(start.getDate() - 1);
+  start.setHours(23, 0, 0, 0);
+  return { start: localDateTimeValue(start.toISOString()), end: localDateTimeValue(end.toISOString()) };
+}
+
 /** AI item lists can be corrected and retained on manual or edited meals. */
 export function parseMealItems(value: FormDataEntryValue | null): string[] {
   if (typeof value !== "string") return [];
