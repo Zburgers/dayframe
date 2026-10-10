@@ -4,7 +4,7 @@ import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "re
 import { completeness, dayMetrics, formatDuration, localDateKey, sevenDayAverage } from "./lib/metrics";
 import { eraseState, normalizeState, readOpenAIKey, readState, writeOpenAIKey, writeState } from "./lib/storage";
 import { Activity, DayframeState, MealEstimate, MovementDay, emptyState } from "./lib/types";
-import { isDayframeBackup, localDateTimeValue, parseMealAmount, suggestedMealTime } from "./lib/validation";
+import { isDayframeBackup, localDateTimeValue, parseMealAmount, parseMealItems, suggestedMealTime } from "./lib/validation";
 
 type Tab = "today" | "log" | "history" | "settings";
 type Notice = { kind: "success" | "error"; message: string } | null;
@@ -120,6 +120,9 @@ export default function Home() {
 
   useEffect(() => () => { if (mealPreview) URL.revokeObjectURL(mealPreview); }, [mealPreview]);
   useEffect(() => () => mealRequest.current?.abort(), []);
+  useEffect(() => {
+    if (tab === "log" && editingMealId) document.getElementById("food-log")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [tab, editingMealId]);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -253,6 +256,7 @@ export default function Home() {
   async function selectMealPhoto(event: ChangeEvent<HTMLInputElement>) {
     const selected = event.target.files?.[0];
     if (!selected) return;
+    event.target.value = "";
     const selection = ++photoSelectionId.current;
     mealRequest.current?.abort();
     mealRequest.current = null;
@@ -290,7 +294,7 @@ export default function Home() {
         body: form,
         signal: controller.signal,
       });
-      const payload = await response.json() as { estimate?: MealEstimate; error?: string };
+      const payload = await response.json().catch(() => ({ error: "The analysis service did not return a valid response." })) as { estimate?: MealEstimate; error?: string };
       if (controller.signal.aborted) return;
       if (!response.ok || !payload.estimate) throw new Error(payload.error || "Could not analyze that photo.");
       setMealEstimate(payload.estimate);
@@ -321,6 +325,10 @@ export default function Home() {
   }
 
   function cancelMealEdit() {
+    photoSelectionId.current += 1;
+    mealRequest.current?.abort();
+    mealRequest.current = null;
+    setAnalyzing(false);
     setEditingMealId(null);
     setMealEstimate(null);
     setMealFile(null);
@@ -346,12 +354,12 @@ export default function Home() {
     }
     const previous = editingMeal;
     const updated = {
-      id: previous?.id ?? id(), eatenAt: eatenAtDate.toISOString(), name,
+      id: previous?.id ?? id(), eatenAt: eatenAtDate.toISOString(), name: name.slice(0, 100),
       calories: Math.round(calories), proteinGrams, carbsGrams, fatGrams,
       source: mealEstimate ? "photo-estimate" as const : previous?.source ?? "manual" as const,
       confidence: mealEstimate?.confidence ?? previous?.confidence,
-      items: mealEstimate?.items ?? previous?.items,
-      note: mealEstimate?.note ?? previous?.note,
+      items: parseMealItems(form.get("mealItems")),
+      note: String(form.get("mealNote") ?? "").trim().slice(0, 500),
     };
     setState((current) => ({
       ...current,
@@ -362,11 +370,13 @@ export default function Home() {
     photoSelectionId.current += 1;
     mealRequest.current?.abort();
     mealRequest.current = null;
+    setAnalyzing(false);
     setMealPreview(null);
     setMealFile(null);
     setMealEstimate(null);
     setMealError("");
     setEditingMealId(null);
+    setSelectedDate(localDateKey(updated.eatenAt));
     if (mealInput.current) mealInput.current.value = "";
     event.currentTarget.reset();
     flash("success", `${name} ${previous ? "updated" : "saved"} on this device.`);
@@ -526,12 +536,14 @@ export default function Home() {
             <p className="privacy-line"><span>✓</span> Photo bytes are discarded after this request. Review every estimate before saving.</p>
             <div className="form-divider"><span>{mealEstimate ? "Review the estimate" : "meal details"}</span></div>
             <form className="form-grid meal-form" onSubmit={saveMeal} key={`${selectedDate}-${editingMeal?.id ?? "new"}-${mealEstimate ? JSON.stringify(mealEstimate) : "manual"}`}>
-              <label className="wide">Meal name<input name="mealName" defaultValue={mealEstimate?.name ?? editingMeal?.name ?? ""} placeholder="Paneer rice bowl" required /></label>
+              <label className="wide">Meal name<input name="mealName" defaultValue={mealEstimate?.name ?? editingMeal?.name ?? ""} placeholder="Paneer rice bowl" maxLength={100} required /></label>
               <label>Time<input name="eatenAt" type="datetime-local" defaultValue={editingMeal ? localDateTimeValue(editingMeal.eatenAt) : suggestedMealTime(selectedDate)} required /></label>
               <label>Calories<input name="mealCalories" type="number" min="0" max="5000" defaultValue={mealEstimate?.calories ?? editingMeal?.calories ?? ""} placeholder="650" required /></label>
               <label>Protein (g)<input name="mealProtein" type="number" min="0" max="500" step="0.1" defaultValue={mealEstimate?.proteinGrams ?? editingMeal?.proteinGrams ?? ""} /></label>
               <label>Carbs (g)<input name="mealCarbs" type="number" min="0" max="800" step="0.1" defaultValue={mealEstimate?.carbsGrams ?? editingMeal?.carbsGrams ?? ""} /></label>
               <label>Fat (g)<input name="mealFat" type="number" min="0" max="500" step="0.1" defaultValue={mealEstimate?.fatGrams ?? editingMeal?.fatGrams ?? ""} /></label>
+              <label className="wide">Food items (comma separated)<input name="mealItems" maxLength={800} defaultValue={mealEstimate?.items.join(", ") ?? editingMeal?.items?.join(", ") ?? ""} placeholder="Rice, paneer, vegetables" /></label>
+              <label className="wide">Notes and estimate uncertainty<textarea name="mealNote" maxLength={500} defaultValue={mealEstimate?.note ?? editingMeal?.note ?? ""} placeholder="Portion details, sauces, or anything to remember" /></label>
               {mealEstimate && <div className="estimate-note wide"><b>{mealEstimate.confidence} confidence</b><p>{mealEstimate.note}</p>{mealEstimate.items.length > 0 && <small>{mealEstimate.items.join(" · ")}</small>}</div>}
               <button className="primary-button coral-button" type="submit">{editingMeal ? "Update meal" : "Save meal"} and discard photo</button>
             </form>
