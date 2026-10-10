@@ -4,6 +4,7 @@ import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "re
 import { completeness, dayMetrics, formatDuration, localDateKey, sevenDayAverage } from "./lib/metrics";
 import { eraseState, normalizeState, readOpenAIKey, readState, writeOpenAIKey, writeState } from "./lib/storage";
 import { Activity, DayframeState, MealEstimate, MovementDay, emptyState } from "./lib/types";
+import { isDayframeBackup, localDateTimeValue, parseMealAmount, suggestedMealTime } from "./lib/validation";
 
 type Tab = "today" | "log" | "history" | "settings";
 type Notice = { kind: "success" | "error"; message: string } | null;
@@ -95,7 +96,11 @@ export default function Home() {
   const [mealFile, setMealFile] = useState<File | null>(null);
   const [mealPreview, setMealPreview] = useState<string | null>(null);
   const [mealEstimate, setMealEstimate] = useState<MealEstimate | null>(null);
+  const [editingMealId, setEditingMealId] = useState<string | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
+  const mealRequest = useRef<AbortController | null>(null);
+  const photoSelectionId = useRef(0);
+  const mealInput = useRef<HTMLInputElement>(null);
   const [mealError, setMealError] = useState("");
   const [openAIKey, setOpenAIKey] = useState("");
   const [keyConfigured, setKeyConfigured] = useState(false);
@@ -114,6 +119,7 @@ export default function Home() {
   }, [state, loaded]);
 
   useEffect(() => () => { if (mealPreview) URL.revokeObjectURL(mealPreview); }, [mealPreview]);
+  useEffect(() => () => mealRequest.current?.abort(), []);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -128,6 +134,7 @@ export default function Home() {
   }, []);
 
   const metrics = useMemo(() => dayMetrics(state, selectedDate), [state, selectedDate]);
+  const editingMeal = state.meals.find((meal) => meal.id === editingMealId) ?? null;
   const openSleep = state.sleepSessions.find((session) => !session.endedAt);
   const averageSleep = sevenDayAverage(state, selectedDate, "sleep");
   const averageSteps = sevenDayAverage(state, selectedDate, "steps");
@@ -246,57 +253,130 @@ export default function Home() {
   async function selectMealPhoto(event: ChangeEvent<HTMLInputElement>) {
     const selected = event.target.files?.[0];
     if (!selected) return;
-    setMealError("");
+    const selection = ++photoSelectionId.current;
+    mealRequest.current?.abort();
+    mealRequest.current = null;
+    setAnalyzing(false);
+    setMealFile(null);
+    setMealPreview(null);
     setMealEstimate(null);
+    setMealError("");
     try {
       const prepared = await normalizeMealImage(selected);
-      if (mealPreview) URL.revokeObjectURL(mealPreview);
+      if (selection !== photoSelectionId.current) return;
       setMealFile(prepared);
       setMealPreview(URL.createObjectURL(prepared));
     } catch (error) {
-      setMealError(error instanceof Error ? error.message : "That image could not be read.");
+      if (selection === photoSelectionId.current) {
+        setMealError(error instanceof Error ? error.message : "That image could not be read.");
+      }
     }
   }
 
   async function analyzeMeal() {
     if (!mealFile) return;
+    mealRequest.current?.abort();
+    const controller = new AbortController();
+    mealRequest.current = controller;
     setAnalyzing(true);
+    setMealEstimate(null);
     setMealError("");
     try {
       const form = new FormData();
       form.append("image", mealFile);
-      const response = await fetch("/api/analyze-meal", { method: "POST", headers: openAIKey ? { "x-dayframe-openai-key": openAIKey } : undefined, body: form });
+      const response = await fetch("/api/analyze-meal", {
+        method: "POST",
+        headers: openAIKey ? { "x-dayframe-openai-key": openAIKey } : undefined,
+        body: form,
+        signal: controller.signal,
+      });
       const payload = await response.json() as { estimate?: MealEstimate; error?: string };
+      if (controller.signal.aborted) return;
       if (!response.ok || !payload.estimate) throw new Error(payload.error || "Could not analyze that photo.");
       setMealEstimate(payload.estimate);
     } catch (error) {
-      setMealError(error instanceof Error ? error.message : "Photo analysis is unavailable.");
+      if (!controller.signal.aborted) {
+        setMealError(error instanceof Error ? error.message : "Photo analysis is unavailable.");
+      }
     } finally {
-      setAnalyzing(false);
+      if (mealRequest.current === controller) {
+        mealRequest.current = null;
+        setAnalyzing(false);
+      }
     }
+  }
+
+  function editMeal(mealId: string) {
+    if (!state.meals.some((meal) => meal.id === mealId)) return;
+    photoSelectionId.current += 1;
+    mealRequest.current?.abort();
+    mealRequest.current = null;
+    setAnalyzing(false);
+    setMealFile(null);
+    setMealPreview(null);
+    setMealEstimate(null);
+    setMealError("");
+    setEditingMealId(mealId);
+    setTab("log");
+  }
+
+  function cancelMealEdit() {
+    setEditingMealId(null);
+    setMealEstimate(null);
+    setMealFile(null);
+    setMealPreview(null);
+    setMealError("");
+    if (mealInput.current) mealInput.current.value = "";
   }
 
   function saveMeal(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     const name = String(form.get("mealName") ?? "").trim();
-    if (!name) return;
-    const eatenAtRaw = String(form.get("eatenAt") || `${selectedDate}T12:00`);
-    setState((current) => ({ ...current, meals: [...current.meals, {
-      id: id(), eatenAt: new Date(eatenAtRaw).toISOString(), name,
-      calories: Math.round(number(form.get("mealCalories"))), proteinGrams: number(form.get("mealProtein")),
-      carbsGrams: number(form.get("mealCarbs")), fatGrams: number(form.get("mealFat")),
-      source: mealEstimate ? "photo-estimate" : "manual", confidence: mealEstimate?.confidence,
-      items: mealEstimate?.items, note: mealEstimate?.note,
-    }] }));
-    if (mealPreview) URL.revokeObjectURL(mealPreview);
-    setMealPreview(null); setMealFile(null); setMealEstimate(null); setMealError("");
+    const eatenAtRaw = String(form.get("eatenAt") ?? "");
+    const eatenAtDate = new Date(eatenAtRaw);
+    const calories = parseMealAmount(form.get("mealCalories"), 5000, true);
+    const proteinGrams = parseMealAmount(form.get("mealProtein"), 500);
+    const carbsGrams = parseMealAmount(form.get("mealCarbs"), 800);
+    const fatGrams = parseMealAmount(form.get("mealFat"), 500);
+    if (!name || !Number.isFinite(eatenAtDate.getTime()) ||
+        calories === null || proteinGrams === null || carbsGrams === null || fatGrams === null) {
+      flash("error", "Enter a valid meal name, date, calories, and nonnegative macros.");
+      return;
+    }
+    const previous = editingMeal;
+    const updated = {
+      id: previous?.id ?? id(), eatenAt: eatenAtDate.toISOString(), name,
+      calories: Math.round(calories), proteinGrams, carbsGrams, fatGrams,
+      source: mealEstimate ? "photo-estimate" as const : previous?.source ?? "manual" as const,
+      confidence: mealEstimate?.confidence ?? previous?.confidence,
+      items: mealEstimate?.items ?? previous?.items,
+      note: mealEstimate?.note ?? previous?.note,
+    };
+    setState((current) => ({
+      ...current,
+      meals: previous
+        ? current.meals.map((meal) => meal.id === previous.id ? updated : meal)
+        : [...current.meals, updated],
+    }));
+    photoSelectionId.current += 1;
+    mealRequest.current?.abort();
+    mealRequest.current = null;
+    setMealPreview(null);
+    setMealFile(null);
+    setMealEstimate(null);
+    setMealError("");
+    setEditingMealId(null);
+    if (mealInput.current) mealInput.current.value = "";
     event.currentTarget.reset();
-    flash("success", `${name} saved. The photo was discarded.`);
+    flash("success", `${name} ${previous ? "updated" : "saved"} on this device.`);
   }
 
   function removeMeal(mealId: string) {
-    setState((current) => ({ ...current, meals: current.meals.filter((meal) => meal.id !== mealId) }));
+    const meal = state.meals.find((item) => item.id === mealId);
+    if (!meal || !window.confirm(`Remove "${meal.name}" from your journal?`)) return;
+    setState((current) => ({ ...current, meals: current.meals.filter((item) => item.id !== mealId) }));
+    if (editingMealId === mealId) cancelMealEdit();
     flash("success", "Meal removed.");
   }
 
@@ -312,7 +392,9 @@ export default function Home() {
     const file = event.target.files?.[0];
     if (!file) return;
     try {
-      const restored = normalizeState(JSON.parse(await file.text()));
+      const parsed: unknown = JSON.parse(await file.text());
+      if (!isDayframeBackup(parsed)) throw new Error("Invalid backup");
+      const restored = normalizeState(parsed);
       if (!window.confirm("Replace all current Dayframe data with this backup?")) return;
       setState(restored);
       flash("success", "Backup restored on this device.");
