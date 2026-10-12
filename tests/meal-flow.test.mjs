@@ -3,7 +3,6 @@ import test from "node:test";
 import { isDayframeBackup, localDateTimeValue, parseMealAmount, parseMealItems, suggestedMealTime, suggestedSleepRange } from "../app/lib/validation.ts";
 import { dayMetrics } from "../app/lib/metrics.ts";
 import { withAddedActivity, withRemovedActivity } from "../app/lib/activity.ts";
-import { POST } from "../app/api/analyze-meal/route.ts";
 
 const empty = () => ({ version: 1, sleepSessions: [], movementDays: [], meals: [] });
 
@@ -57,24 +56,6 @@ test("daily nutrition totals use meal timestamps instead of another selected day
   assert.equal(selected.carbs, 90);
   assert.equal(selected.fat, 26);
   assert.equal(dayMetrics(state, "2026-10-11").caloriesIn, 600);
-});
-
-test("meal API rejects requests without an image", async () => {
-  const response = await POST(new Request("https://example.test/api/analyze-meal", {
-    method: "POST",
-    body: new FormData(),
-  }));
-  assert.equal(response.status, 400);
-  assert.equal(response.headers.get("cache-control"), "no-store, max-age=0");
-  const data = await response.json();
-  assert.match(data.error, /photo/i);
-});
-
-test("meal API rejects unsupported photos before contacting the vision provider", async () => {
-  const form = new FormData();
-  form.append("image", new File(["not an image"], "food.txt", { type: "text/plain" }));
-  const response = await POST(new Request("https://example.test/api/analyze-meal", { method: "POST", body: form }));
-  assert.equal(response.status, 415);
 });
 
 test("activity-derived calories accumulate, while explicit daily totals stay unchanged", () => {

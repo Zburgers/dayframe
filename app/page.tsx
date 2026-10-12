@@ -1,9 +1,16 @@
+Warning: truncated output (original token count: 10832)
+Total output lines: 638
+
 "use client";
 
 import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { useAction, useMutation, useQuery } from "convex/react";
+import { useAuthActions, useConvexAuth } from "@convex-dev/auth/react";
+import { api } from "../convex/_generated/api";
+import { AuthPanel } from "./AuthPanel";
 import { completeness, dayMetrics, formatDuration, localDateKey, sevenDayAverage } from "./lib/metrics";
 import { withAddedActivity, withRemovedActivity } from "./lib/activity";
-import { eraseState, normalizeState, readOpenAIKey, readState, writeOpenAIKey, writeState } from "./lib/storage";
+import { eraseState, normalizeState, readState } from "./lib/storage";
 import { Activity, DayframeState, MealEstimate, MovementDay, emptyState } from "./lib/types";
 import { isDayframeBackup, localDateTimeValue, parseMealAmount, parseMealItems, suggestedMealTime, suggestedSleepRange } from "./lib/validation";
 
@@ -17,6 +24,14 @@ function dateLabel(date: string, options: Intl.DateTimeFormatOptions = { weekday
   return new Intl.DateTimeFormat("en-IN", options).format(new Date(`${date}T12:00:00`));
 }
 
+function base64(bytes: Uint8Array): string {
+  let result = "";
+  const chunkSize = 0x8000;
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    result += String.fromCharCode(...bytes.subarray(index, Math.min(index + chunkSize, bytes.length)));
+  }
+  return btoa(result);
+}
 async function normalizeMealImage(file: File): Promise<File> {
   if (file.size > 12 * 1024 * 1024) throw new Error("Choose a photo smaller than 12 MB.");
   const objectUrl = URL.createObjectURL(file);
@@ -30,8 +45,9 @@ async function normalizeMealImage(file: File): Promise<File> {
     canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
     canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
     canvas.getContext("2d")?.drawImage(image, 0, 0, canvas.width, canvas.height);
-    const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.84));
+    const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.78));
     if (!blob) throw new Error("Could not prepare that photo.");
+    if (blob.size > 4_500_000) throw new Error("That photo is still too large after preparation. Choose a smaller image.");
     return new File([blob], "meal.jpg", { type: "image/jpeg" });
   } finally {
     URL.revokeObjectURL(objectUrl);
@@ -83,9 +99,21 @@ function Heatmap({ state, onSelect }: { state: DayframeState; onSelect: (date: s
 
 export default function Home() {
   const today = localDateKey(new Date());
+  const { isLoading: authLoading, isAuthenticated } = useConvexAuth();
+  const { signOut } = useAuthActions();
+  const remoteState = useQuery(api.health.getState, isAuthenticated ? {} : "skip");
+  const modelSettings = useQuery(api.modelSettings.getSettings, isAuthenticated ? {} : "skip");
+  const syncState = useMutation(api.health.syncState);
+  const clearCloudState = useMutation(api.health.clearState);
+  const saveModelSelection = useMutation(api.modelSettings.saveSelection);
+  const analyzeMealAction = useAction(api.mealAnalysis.analyzeMeal);
+  const saveOpenRouterKeyAction = useAction(api.modelSettingsActions.saveOpenRouterKey);
+  const removeOpenRouterKeyAction = useAction(api.modelSettingsActions.removeOpenRouterKey);
   const [state, setState] = useState<DayframeState>(emptyState);
   const [loaded, setLoaded] = useState(false);
-  const [canPersist, setCanPersist] = useState(false);
+  const stateRef = useRef<DayframeState>(emptyState);
+  const stateReadyRef = useRef(false);
+  const syncQueueRef = useRef<Promise<void>>(Promise.resolve());
   const [tab, setTab] = useState<Tab>("today");
   const [selectedDate, setSelectedDate] = useState(today);
   const [notice, setNotice] = useState<Notice>(null);
@@ -95,42 +123,62 @@ export default function Home() {
   const [mealEstimate, setMealEstimate] = useState<MealEstimate | null>(null);
   const [editingMealId, setEditingMealId] = useState<string | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
-  const mealRequest = useRef<AbortController | null>(null);
   const photoSelectionId = useRef(0);
   const mealInput = useRef<HTMLInputElement>(null);
   const [mealError, setMealError] = useState("");
-  const [openAIKey, setOpenAIKey] = useState("");
-  const [keyConfigured, setKeyConfigured] = useState(false);
+  const [selectedProvider, setSelectedProvider] = useState<"openai" | "openrouter">("openai");
+  const [selectedModel, setSelectedModel] = useState("gpt-4o-mini");
+  const [customOpenRouterModel, setCustomOpenRouterModel] = useState("");
   const restoreInput = useRef<HTMLInputElement>(null);
+  const migratedRef = useRef(false);
 
   useEffect(() => {
-    // The encryption/API-key record is independent from health history. A key
-    // read failure must never cause an empty history to overwrite valid data.
-    let active = true;
-    Promise.allSettled([readState(), readOpenAIKey()]).then(([history, key]) => {
-      if (!active) return;
-      if (history.status === "fulfilled") {
-        setState(history.value);
-        setCanPersist(true);
-      } else {
-        setNotice({ kind: "error", message: "Local history could not be loaded. No changes will be saved until storage is available." });
+    if (authLoading) return;
+    if (!isAuthenticated) {
+      const resetTimer = window.setTimeout(() => {
+        migratedRef.current = false;
+        stateReadyRef.current = false;
+        stateRef.current = emptyState;
+        setLoaded(false);
+        setState(emptyState);
+      }, 0);
+      return () => window.clearTimeout(resetTimer);
+    }
+    if (remoteState === undefined || migratedRef.current) return;
+    migratedRef.current = true;
+    void (async () => {
+      let local = emptyState;
+      try {
+        local = normalizeState(await readState());
+      } catch {
+        // A failed local migration read must not turn into an empty cloud write.
       }
-      if (key.status === "fulfilled") {
-        setOpenAIKey(key.value);
-        setKeyConfigured(Boolean(key.value));
-      }
+      const hasRemote = Boolean(remoteState && (remoteState.sleepSessions.length || remoteState.movementDays.length || remoteState.meals.length));
+      const hasLocal = Boolean(local.sleepSessions.length || local.movementDays.length || local.meals.length);
+      const next = !hasRemote && hasLocal ? local : (remoteState ?? emptyState);
+      stateRef.current = next;
+      stateReadyRef.current = true;
+      setState(next);
+      if (!hasRemote && hasLocal) await syncState({ state: next });
       setLoaded(true);
+    })().catch(() => {
+      stateReadyRef.current = false;
+      setNotice({ kind: "error", message: "Your Convex data could not be opened. No changes have been saved." });
     });
-    return () => { active = false; };
-  }, []);
+  }, [authLoading, isAuthenticated, remoteState, syncState]);
 
   useEffect(() => {
-    if (!canPersist) return;
-    writeState(state).catch(() => setNotice({ kind: "error", message: "A change could not be saved on this device." }));
-  }, [state, canPersist]);
+    if (!modelSettings) return;
+    const settingsTimer = window.setTimeout(() => {
+      setSelectedProvider(modelSettings.provider);
+      setSelectedModel(modelSettings.model);
+      setCustomOpenRouterModel(modelSettings.provider === "openrouter" && !modelSettings.catalog.some((item) => item.provider === "openrouter" && item.model === modelSettings.model) ? modelSettings.model : "");
+    }, 0);
+    return () => window.clearTimeout(settingsTimer);
+  }, [modelSettings]);
 
   useEffect(() => () => { if (mealPreview) URL.revokeObjectURL(mealPreview); }, [mealPreview]);
-  useEffect(() => () => mealRequest.current?.abort(), []);
+  useEffect(() => () => { photoSelectionId.current += 1; }, []);
   useEffect(() => {
     if (tab === "log" && editingMealId) document.getElementById("food-log")?.scrollIntoView({ behavior: "smooth", block: "start" });
   }, [tab, editingMealId]);
@@ -159,6 +207,17 @@ export default function Home() {
     window.setTimeout(() => setNotice(null), 4200);
   }
 
+  function updateState(updater: (current: DayframeState) => DayframeState) {
+    if (!stateReadyRef.current) return;
+    const next = updater(stateRef.current);
+    stateRef.current = next;
+    setState(next);
+    syncQueueRef.current = syncQueueRef.current
+      .catch(() => undefined)
+      .then(async () => { await syncState({ state: next }); })
+      .catch(() => setNotice({ kind: "error", message: "That change could not be saved to Convex. Your current screen may not be synced." }));
+  }
+
   function moveDate(delta: number) {
     const date = new Date(`${selectedDate}T12:00:00`);
     date.setDate(date.getDate() + delta);
@@ -167,7 +226,7 @@ export default function Home() {
   }
 
   function upsertMovement(next: MovementDay) {
-    setState((current) => ({
+    updateState((current) => ({
       ...current,
       movementDays: [...current.movementDays.filter((day) => day.date !== next.date), next],
     }));
@@ -197,7 +256,7 @@ export default function Home() {
     const activity: Activity = { id: id(), name, minutes: Math.round(number(form.get("activityMinutes"))), calories: Math.round(number(form.get("activityCalories"))) };
     const date = selectedDate;
     const updatedAt = new Date().toISOString();
-    setState((current) => {
+    updateState((current) => {
       const existing = current.movementDays.find((day) => day.date === date);
       const next = withAddedActivity(existing, date, activity, updatedAt);
       return { ...current, movementDays: [...current.movementDays.filter((day) => day.date !== date), next] };
@@ -211,7 +270,7 @@ export default function Home() {
     if (!activity || !window.confirm(`Remove "${activity.name}" from this day?`)) return;
     const date = selectedDate;
     const updatedAt = new Date().toISOString();
-    setState((current) => ({
+    updateState((current) => ({
       ...current,
       movementDays: current.movementDays.map((day) => day.date === date ? withRemovedActivity(day, activityId, updatedAt) : day),
     }));
@@ -220,14 +279,14 @@ export default function Home() {
 
   function startSleep() {
     if (openSleep) return;
-    setState((current) => ({ ...current, sleepSessions: [...current.sleepSessions, { id: id(), startedAt: new Date().toISOString(), endedAt: null }] }));
+    updateState((current) => ({ ...current, sleepSessions: [...current.sleepSessions, { id: id(), startedAt: new Date().toISOString(), endedAt: null }] }));
     flash("success", "Sleep timer started. Good night.");
   }
 
   function finishSleep() {
     if (!openSleep) return;
     const endedAt = new Date().toISOString();
-    setState((current) => ({ ...current, sleepSessions: current.sleepSessions.map((session) => session.id === openSleep.id ? { ...session, endedAt } : session) }));
+    updateState((current) => ({ ...current, sleepSessions: current.sleepSessions.map((session) => session.id === openSleep.id ? { ...session, endedAt } : session) }));
     setSelectedDate(localDateKey(endedAt));
     flash("success", "Sleep session saved. Morning.");
   }
@@ -244,7 +303,7 @@ export default function Home() {
     }
     const startedAt = start.toISOString();
     const endedAt = end.toISOString();
-    setState((current) => ({ ...current, sleepSessions: [...current.sleepSessions, { id: id(), startedAt, endedAt }] }));
+    updateState((current) => ({ ...current, sleepSessions: [...current.sleepSessions, { id: id(), startedAt, endedAt }] }));
     setSelectedDate(localDateKey(endedAt));
     event.currentTarget.reset();
     flash("success", "Sleep session added.");
@@ -253,7 +312,7 @@ export default function Home() {
   function removeSleep(sleepId: string) {
     const session = state.sleepSessions.find((entry) => entry.id === sleepId);
     if (!session || !window.confirm("Remove this recorded sleep session?")) return;
-    setState((current) => ({ ...current, sleepSessions: current.sleepSessions.filter((entry) => entry.id !== sleepId) }));
+    updateState((current) => ({ ...current, sleepSessions: current.sleepSessions.filter((entry) => entry.id !== sleepId) }));
     flash("success", "Sleep session removed.");
   }
 
@@ -288,8 +347,6 @@ export default function Home() {
     if (!selected) return;
     event.target.value = "";
     const selection = ++photoSelectionId.current;
-    mealRequest.current?.abort();
-    mealRequest.current = null;
     setAnalyzing(false);
     setMealFile(null);
     setMealPreview(null);
@@ -309,42 +366,26 @@ export default function Home() {
 
   async function analyzeMeal() {
     if (!mealFile) return;
-    mealRequest.current?.abort();
-    const controller = new AbortController();
-    mealRequest.current = controller;
+    const selection = photoSelectionId.current;
     setAnalyzing(true);
     setMealEstimate(null);
     setMealError("");
     try {
-      const form = new FormData();
-      form.append("image", mealFile);
-      const response = await fetch("/api/analyze-meal", {
-        method: "POST",
-        headers: openAIKey ? { "x-dayframe-openai-key": openAIKey } : undefined,
-        body: form,
-        signal: controller.signal,
-      });
-      const payload = await response.json().catch(() => ({ error: "The analysis service did not return a valid response." })) as { estimate?: MealEstimate; error?: string };
-      if (controller.signal.aborted) return;
-      if (!response.ok || !payload.estimate) throw new Error(payload.error || "Could not analyze that photo.");
-      setMealEstimate(payload.estimate);
+      if (!["image/jpeg", "image/png", "image/webp"].includes(mealFile.type)) throw new Error("Use a JPEG, PNG, or WebP photo.");
+      const estimate = await analyzeMealAction({ imageBase64: base64(new Uint8Array(await mealFile.arrayBuffer())), mimeType: mealFile.type as "image/jpeg" | "image/png" | "image/webp" });
+      if (selection === photoSelectionId.current) setMealEstimate(estimate);
     } catch (error) {
-      if (!controller.signal.aborted) {
+      if (selection === photoSelectionId.current) {
         setMealError(error instanceof Error ? error.message : "Photo analysis is unavailable.");
       }
     } finally {
-      if (mealRequest.current === controller) {
-        mealRequest.current = null;
-        setAnalyzing(false);
-      }
+      if (selection === photoSelectionId.current) setAnalyzing(false);
     }
   }
 
   function editMeal(mealId: string) {
     if (!state.meals.some((meal) => meal.id === mealId)) return;
     photoSelectionId.current += 1;
-    mealRequest.current?.abort();
-    mealRequest.current = null;
     setAnalyzing(false);
     setMealFile(null);
     setMealPreview(null);
@@ -356,148 +397,7 @@ export default function Home() {
 
   function cancelMealEdit() {
     photoSelectionId.current += 1;
-    mealRequest.current?.abort();
-    mealRequest.current = null;
-    setAnalyzing(false);
-    setEditingMealId(null);
-    setMealEstimate(null);
-    setMealFile(null);
-    setMealPreview(null);
-    setMealError("");
-    if (mealInput.current) mealInput.current.value = "";
-  }
-
-  function saveMeal(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const form = new FormData(event.currentTarget);
-    const name = String(form.get("mealName") ?? "").trim();
-    const eatenAtRaw = String(form.get("eatenAt") ?? "");
-    const eatenAtDate = new Date(eatenAtRaw);
-    const calories = parseMealAmount(form.get("mealCalories"), 5000, true);
-    const proteinGrams = parseMealAmount(form.get("mealProtein"), 500);
-    const carbsGrams = parseMealAmount(form.get("mealCarbs"), 800);
-    const fatGrams = parseMealAmount(form.get("mealFat"), 500);
-    if (!name || !Number.isFinite(eatenAtDate.getTime()) ||
-        calories === null || proteinGrams === null || carbsGrams === null || fatGrams === null) {
-      flash("error", "Enter a valid meal name, date, calories, and nonnegative macros.");
-      return;
-    }
-    const previous = editingMeal;
-    const updated = {
-      id: previous?.id ?? id(), eatenAt: eatenAtDate.toISOString(), name: name.slice(0, 100),
-      calories: Math.round(calories), proteinGrams, carbsGrams, fatGrams,
-      source: mealEstimate ? "photo-estimate" as const : previous?.source ?? "manual" as const,
-      confidence: mealEstimate?.confidence ?? previous?.confidence,
-      items: parseMealItems(form.get("mealItems")),
-      note: String(form.get("mealNote") ?? "").trim().slice(0, 500),
-    };
-    setState((current) => ({
-      ...current,
-      meals: previous
-        ? current.meals.map((meal) => meal.id === previous.id ? updated : meal)
-        : [...current.meals, updated],
-    }));
-    photoSelectionId.current += 1;
-    mealRequest.current?.abort();
-    mealRequest.current = null;
-    setAnalyzing(false);
-    setMealPreview(null);
-    setMealFile(null);
-    setMealEstimate(null);
-    setMealError("");
-    setEditingMealId(null);
-    setSelectedDate(localDateKey(updated.eatenAt));
-    if (mealInput.current) mealInput.current.value = "";
-    event.currentTarget.reset();
-    flash("success", `${name} ${previous ? "updated" : "saved"} on this device.`);
-  }
-
-  function removeMeal(mealId: string) {
-    const meal = state.meals.find((item) => item.id === mealId);
-    if (!meal || !window.confirm(`Remove "${meal.name}" from your journal?`)) return;
-    setState((current) => ({ ...current, meals: current.meals.filter((item) => item.id !== mealId) }));
-    if (editingMealId === mealId) cancelMealEdit();
-    flash("success", "Meal removed.");
-  }
-
-  function downloadBackup() {
-    const blob = new Blob([JSON.stringify(state, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url; link.download = `dayframe-backup-${today}.json`; link.click();
-    URL.revokeObjectURL(url);
-  }
-
-  async function restoreBackup(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    try {
-      const parsed: unknown = JSON.parse(await file.text());
-      if (!isDayframeBackup(parsed)) throw new Error("Invalid backup");
-      const restored = normalizeState(parsed);
-      if (!window.confirm("Replace all current Dayframe data with this backup?")) return;
-      setState(restored);
-      flash("success", "Backup restored on this device.");
-    } catch {
-      flash("error", "That file is not a valid Dayframe backup.");
-    } finally { event.target.value = ""; }
-  }
-
-  async function eraseEverything() {
-    if (!window.confirm("Erase every sleep, movement, and meal record stored by Dayframe on this device? This cannot be undone without a backup.")) return;
-    try {
-      await eraseState();
-      setState(emptyState);
-      setOpenAIKey("");
-      setKeyConfigured(false);
-      flash("success", "All Dayframe data and the saved photo-analysis key were erased on this device.");
-    } catch (error) { flash("error", error instanceof Error ? error.message : "Data could not be erased."); }
-  }
-
-  async function saveApiKey(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const value = String(new FormData(event.currentTarget).get("openaiKey") ?? "").trim();
-    if (!value.startsWith("sk-") || value.length < 20) {
-      flash("error", "Enter a valid OpenAI API key beginning with sk-.");
-      return;
-    }
-    try {
-      await writeOpenAIKey(value);
-      setOpenAIKey(value);
-      setKeyConfigured(true);
-      event.currentTarget.reset();
-      flash("success", "Photo estimates are configured on this device.");
-    } catch { flash("error", "The key could not be saved on this device."); }
-  }
-
-  async function removeApiKey() {
-    await writeOpenAIKey("");
-    setOpenAIKey("");
-    setKeyConfigured(false);
-    flash("success", "The local API key was removed.");
-  }
-
-  const debrief = (() => {
-    const parts: string[] = [];
-    if (metrics.sleepMinutes) parts.push(`You logged ${formatDuration(metrics.sleepMinutes)} of sleep`); else parts.push("Sleep is not logged yet");
-    if (metrics.steps) parts.push(`${metrics.steps.toLocaleString("en-IN")} steps`); else if (metrics.activities.length) parts.push(`${metrics.exerciseMinutes} active minutes`); else parts.push("movement is still open");
-    if (metrics.meals.length) parts.push(`${metrics.meals.length} meal${metrics.meals.length === 1 ? "" : "s"} totalling about ${metrics.caloriesIn.toLocaleString("en-IN")} kcal`); else parts.push("food is not logged yet");
-    return `${parts[0]}. ${parts[1][0].toUpperCase()}${parts[1].slice(1)}, and ${parts[2]}.`;
-  })();
-
-  if (!loaded) return <main className="loading-screen"><div className="brand-mark">D</div><p>Opening your day…</p></main>;
-  if (!canPersist) return <main className="loading-screen"><div className="brand-mark">D</div><p>Dayframe could not read your saved history. To protect it, logging is paused.</p><button className="secondary-button" onClick={() => window.location.reload()}>Retry opening Dayframe</button></main>;
-
-  return (
-    <main className="app-shell">
-      {notice && <div className={`notice notice-${notice.kind}`} role="status">{notice.message}</div>}
-      <header className="topbar">
-        <button className="brand" onClick={() => setTab("today")} aria-label="Open today"><span className="brand-mark">D</span><span><b>Dayframe</b><small>Private daily health</small></span></button>
-        <div className="local-badge"><i /> On this device</div>
-      </header>
-
-      <nav className="primary-nav" aria-label="Main navigation">
-        {(["today", "log", "history", "settings"] as Tab[]).map((item) => <button key={item} className={tab === item ? "active" : ""} onClick={() => setTab(item)}><span>{item === "today" ? "◉" : item === "log" ? "+" : item === "history" ? "▦" : "○"}</span>{item}</button>)}
+  …1832 tokens truncated…story" ? "▦" : "○"}</span>{item}</button>)}
       </nav>
 
       <div className="page-wrap">
@@ -541,7 +441,7 @@ export default function Home() {
         </>}
 
         {tab === "log" && <section className="log-layout">
-          <div className="log-intro"><p className="eyebrow">Log your day</p><h1>Three signals.<br/><em>One honest picture.</em></h1><p>Add what you know. Every field can be corrected later, and nothing in your history leaves this device.</p></div>
+          <div className="log-intro"><p className="eyebrow">Log your day</p><h1>Three signals.<br/><em>One honest picture.</em></h1><p>Add what you know. Every field can be corrected later, and your signed-in history stays synced to Convex.</p></div>
 
           <article className="surface log-card sleep-card"><div className="log-card-title"><span className="entry-icon indigo">Z</span><div><p className="eyebrow">Sleep</p><h2>{openSleep ? "Sleep timer is running" : "Rest, recorded simply"}</h2></div></div>
             <button className="primary-button indigo-button" onClick={openSleep ? finishSleep : startSleep}>{openSleep ? "I’m awake — finish session" : "Going to sleep now"}</button>
@@ -585,11 +485,11 @@ export default function Home() {
 
         {tab === "history" && <section className="history-page"><div className="history-hero"><p className="eyebrow">Your recent rhythm</p><h1>Look back without<br/><em>keeping score.</em></h1></div><article className="surface history-heat"><Heatmap state={state} onSelect={(date) => { setSelectedDate(date); setTab("today"); }} /></article><div className="day-list">{Array.from({ length: 14 }, (_, offset) => { const day = new Date(); day.setDate(day.getDate() - offset); const date = localDateKey(day); const values = dayMetrics(state, date); return <button key={date} onClick={() => { setSelectedDate(date); setTab("today"); }}><time>{dateLabel(date, { weekday: "short", month: "short", day: "numeric" })}</time><span><b>{formatDuration(values.sleepMinutes)}</b> sleep</span><span><b>{values.steps ? values.steps.toLocaleString("en-IN") : "—"}</b> steps</span><span><b>{values.caloriesIn ? `${values.caloriesIn} kcal` : "—"}</b> food</span><i className={`heat-${completeness(state, date)}`} /></button>; })}</div></section>}
 
-        {tab === "settings" && <section className="settings-page"><div className="settings-hero"><p className="eyebrow">Settings and privacy</p><h1>Your data belongs<br/><em>to this device.</em></h1><p>Dayframe has no account database. Back up occasionally so browser cleanup or a new phone does not erase your history.</p></div>
-          <article className="surface privacy-card"><span className="privacy-icon">⌁</span><div><h2>Local by design</h2><p>Sleep, movement, and meals are saved in this browser’s IndexedDB. Meal photos are never added to it.</p></div></article>
+        {tab === "settings" && <section className="settings-page"><div className="settings-hero"><p className="eyebrow">Settings and privacy</p><h1>Your data follows<br/><em>your account.</em></h1><p>Health records are persisted in Convex and scoped to your signed-in account, so your history can follow you across devices.</p></div>
+          <article className="surface privacy-card"><span className="privacy-icon">⌁</span><div><h2>Synced by design</h2><p>Sleep, movement, meals, and model preferences are saved to Convex. Meal photos are analyzed in memory and never stored by Dayframe.</p></div></article>
           <div className="settings-grid"><article className="surface setting-card"><p className="eyebrow">Portable copy</p><h2>Back up your history</h2><p>Download a human-readable JSON copy of all records and settings.</p><button className="primary-button" onClick={downloadBackup}>Download backup</button></article><article className="surface setting-card"><p className="eyebrow">Move or recover</p><h2>Restore a backup</h2><p>Validate a Dayframe backup before replacing the data on this device.</p><input ref={restoreInput} className="hidden-input" type="file" accept="application/json" onChange={restoreBackup}/><button className="secondary-button" onClick={() => restoreInput.current?.click()}>Choose backup file</button></article></div>
-          <article className="surface api-key-card"><div><p className="eyebrow">Photo estimates</p><h2>{keyConfigured ? "Vision is configured" : "Connect your own API key"}</h2><p>{keyConfigured ? "Your key is stored separately in this browser and excluded from backups." : "A project-specific OpenAI API key enables meal-photo estimates. API usage is billed separately from ChatGPT."}</p></div>{keyConfigured ? <button className="secondary-button" onClick={removeApiKey}>Remove local key</button> : <form onSubmit={saveApiKey}><label>OpenAI API key<input name="openaiKey" type="password" autoComplete="off" placeholder="sk-proj-…" required /></label><button className="primary-button" type="submit">Save on this device</button></form>}</article>
-          <article className="surface danger-card"><div><p className="eyebrow">Danger zone</p><h2>Erase local history</h2><p>Deletes every Dayframe record stored in this browser. Export a backup first if you may want it later.</p></div><button onClick={eraseEverything}>Erase everything</button></article>
+          <article className="surface api-key-card"><div><p className="eyebrow">Photo estimates</p><h2>Choose a vision model</h2><p>Free OpenRouter vision models are first. They still use your OpenRouter key, which Dayframe encrypts before saving to your account. Hosted OpenAI is optional.</p></div><form className="model-settings-form" onSubmit={saveVisionSettings}><label>Provider<select value={selectedProvider} onChange={(event) => { const nextProvider = event.target.value as "openai" | "openrouter"; const nextModel = (modelSettings?.catalog ?? []).find((item) => item.provider === nextProvider)?.model ?? ""; setSelectedProvider(nextProvider); setSelectedModel(nextModel); setCustomOpenRouterModel(""); }}><option value="openrouter">OpenRouter (free first)</option><option value="openai">OpenAI (hosted)</option></select></label><label>Model<select value={customOpenRouterModel ? "__custom__" : selectedModel} onChange={(event) => { if (event.target.value === "__custom__") { setSelectedModel(""); setCustomOpenRouterModel(""); } else { setSelectedModel(event.target.value); setCustomOpenRouterModel(""); } }}>{(modelSettings?.catalog ?? []).filter((item) => item.provider === selectedProvider).map((item) => <option key={`${item.provider}-${item.model}`} value={item.model}>{item.label}</option>)}{selectedProvider === "openrouter" && <option value="__custom__">Custom OpenRouter model ID…</option>}</select></label>{selectedProvider === "openrouter" && (customOpenRouterModel !== "" || !selectedModel) && <label>Custom OpenRouter model ID<input value={customOpenRouterModel} onChange={(event) => setCustomOpenRouterModel(event.target.value)} placeholder="provider/model-name" /></label>}<button className="primary-button" type="submit">Save vision settings</button></form><div className="provider-key-row">{modelSettings?.openRouterConfigured ? <><p>OpenRouter key connected · ends in <b>…{modelSettings.openRouterKeyLast4}</b></p><button className="secondary-button" type="button" onClick={removeOpenRouterKey}>Remove key</button></> : <form onSubmit={saveOpenRouterKey}><label>OpenRouter API key<input name="openRouterApiKey" type="password" autoComplete="off" placeholder="sk-or-v1-…" required /></label><button className="secondary-button" type="submit">Encrypt and save key</button></form>}</div></article>
+          <article className="surface danger-card"><div><p className="eyebrow">Danger zone</p><h2>Erase synced history</h2><p>Deletes every Dayframe health record from your Convex account. Export a backup first if you may want it later.</p></div><button onClick={eraseEverything}>Erase everything</button></article>
           <footer><b>Dayframe</b><p>A personal journal for patterns—not a medical device.</p></footer>
         </section>}
       </div>

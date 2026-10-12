@@ -2,27 +2,28 @@
 
 Each phase ends with working behavior and explicit acceptance checks.
 
-## Phase 1 — Foundation and private local data
+## Phase 1 — Foundation and private persisted data
 
 **Deliverables**
 
 - Mobile-first visual system and navigation
-- Typed records and IndexedDB repository
+- Typed records, Convex schema, and authenticated repository
+- Password sign-in and per-user state synchronization
 - Seeded demo state only on explicit user action
 - Date selection, empty states, error handling
 - JSON backup, restore, and erase
 
 **Constraints**
 
-- No health records in D1, R2, cookies, analytics, or application logs
+- No health records in D1, R2, cookies, analytics, or application logs outside the authenticated Convex tables
 - No photos persisted in any browser or server store
 - Schema changes remain versioned and migratable
 
 **Success criteria**
 
-- Records survive a reload on the same browser
+- Records survive a reload and a sign-out/sign-in round-trip
 - Invalid imports do not mutate existing data
-- Erase removes every local record
+- Erase removes every Convex and local record for the signed-in user
 
 ## Phase 2 — Sleep and movement
 
@@ -58,7 +59,7 @@ Each phase ends with working behavior and explicit acceptance checks.
 
 - 8 MB maximum; explicit image MIME allowlist
 - No image persistence or body logging
-- API key is either a hosted secret or a separate device-local secret excluded from backups; it is never committed or stored with health records
+- OpenAI uses a Convex deployment secret; OpenRouter BYOK keys are encrypted server-side and excluded from backups; no key is committed or returned to the client
 - Estimates carry confidence and uncertainty copy
 
 **Success criteria**

@@ -2,15 +2,16 @@
 
 ## System shape
 
-Dayframe is a server-rendered web shell with a client-side personal data store and one stateless image-analysis endpoint.
+Dayframe is a web shell backed by authenticated Convex queries, mutations, and actions. The browser keeps a small IndexedDB cache for migration and offline-friendly local backup behavior, while Convex is the durable source for signed-in users.
 
 | Component | Responsibility | Stores health data? |
 |---|---|---|
-| Browser UI | Logging, editing, summaries, heatmap, backup | Yes, on the device only |
-| IndexedDB | Sleep, movement, meals, settings | Yes, locally |
-| Meal analysis route | Validate image, call vision API, return structured estimate | No |
+| Browser UI | Logging, editing, summaries, heatmap, backup | No durable authority |
+| Convex | Auth, sleep, movement, meals, model settings, sync | Yes, per user |
+| IndexedDB | One-time migration source and local cache/erase aid | Yes, locally |
+| Convex meal action | Validate image, call selected vision API, return structured estimate | No image persistence |
 | Vision provider | Analyze the submitted image | Receives the image under provider API terms |
-| Sites hosting | Serve application and stateless route | No application health database |
+| Sites hosting | Serve the application shell | No application health database |
 
 ## Local data model
 
@@ -46,13 +47,13 @@ type Meal = {
 };
 ```
 
-No image bytes or object URLs are placed in IndexedDB.
+No image bytes or object URLs are placed in IndexedDB or Convex.
 
 ## Meal analysis boundary
 
 1. Browser validates type and size and shows a local preview.
 2. The user explicitly requests analysis.
-3. The route reads the body into memory, checks type/size again, and submits a Base64 data URL.
+3. The Convex action receives a bounded Base64 payload, checks its size, and submits a data URL.
 4. The provider returns schema-constrained JSON.
 5. The route validates/clamps the result and returns it.
 6. Request-scoped image bytes become unreachable; no blob or database write occurs.
@@ -61,10 +62,10 @@ No image bytes or object URLs are placed in IndexedDB.
 Controls:
 
 - Accept JPEG, PNG, HEIC/HEIF, and WebP only.
-- Maximum request size: 8 MB.
+- Maximum browser input size: 12 MB; the resized Convex payload is capped below 4.5 MB.
 - Do not log request bodies, Base64 content, or meal output.
-- Keep the provider key only in the hosted secret environment.
-- For the personal deployment, an owner may instead save a project-specific API key in a separate local IndexedDB key. It is excluded from backups, sent only as a request header for photo analysis, and never returned by the endpoint.
+- Keep the hosted OpenAI key only in the Convex environment.
+- OpenRouter BYOK keys are encrypted with a deployment secret before being stored in the per-user model-settings record. Only masked metadata is returned to the browser.
 - Display estimates as editable and never as exact measurements.
 
 ## Apple Health bridge
@@ -90,12 +91,12 @@ The app validates values, asks for confirmation, and upserts movement by date. A
 
 - Export produces a versioned JSON document containing records and settings, never photos or secrets.
 - Import parses, validates, and replaces only after explicit confirmation.
-- Erase clears the IndexedDB database after a destructive-action confirmation.
-- Data from one Sites origin is isolated from other origins by browser security boundaries.
+- Erase clears the signed-in user's Convex records and then clears the local IndexedDB cache after a destructive-action confirmation.
+- Data is isolated by Convex authentication and per-user ownership checks; browser-origin isolation remains an additional boundary.
 
 ## Threat notes
 
 - Anyone with access to the unlocked iPhone/browser profile can access local records.
 - Browser extensions or a compromised device can access rendered data.
 - Network requests for meal estimation disclose the chosen image to the configured provider.
-- Local-only history is vulnerable to browser-data clearing unless backups exist.
+- The local cache is vulnerable to browser-data clearing, but the signed-in Convex copy remains available after re-authentication.

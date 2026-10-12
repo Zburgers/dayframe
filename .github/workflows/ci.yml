@@ -26,4 +26,6 @@ jobs:
         run: npm ci
 
       - name: Run build, rendered HTML tests, lint, and artifact validation
+        env:
+          NEXT_PUBLIC_CONVEX_URL: http://127.0.0.1:3210
         run: npm test && npx tsc --noEmit && npm run lint && npm run validate:artifact
