@@ -19,10 +19,14 @@ if [[ ! -x "${vinext}" ]]; then
 fi
 
 echo "Running bounded vinext build..."
-timeout \
-  --signal=TERM \
-  --kill-after="${SITES_BUILD_KILL_AFTER:-10s}" \
-  "${SITES_BUILD_TIMEOUT:-3m}" \
+if [[ "${OS:-}" == "Windows_NT" || "${OSTYPE:-}" == msys* || "${OSTYPE:-}" == cygwin* ]]; then
   "${vinext}" build
+else
+  timeout \
+    --signal=TERM \
+    --kill-after="${SITES_BUILD_KILL_AFTER:-10s}" \
+    "${SITES_BUILD_TIMEOUT:-3m}" \
+    "${vinext}" build
+fi
 
 bash "${script_dir}/validate-artifact.sh"

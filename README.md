@@ -14,13 +14,13 @@ Dayframe is a private, mobile-first health journal for the three signals that sh
 - Take a meal photo for an editable ballpark calorie and macro estimate
 - Log meals manually when photo analysis is unavailable
 - Review daily debriefs, seven-day averages, and an 84-day consistency heatmap
-- Export a JSON backup, restore it, or erase all local data
+- Export a JSON backup, restore it, or erase all account data
 
 ## Privacy by design
 
-Dayframe stores health logs in the browser's IndexedDB database. The current MVP has no user database and does not send health history to a server. Clearing browser or site data removes the local history, so use the built-in JSON backup regularly.
+Dayframe uses Convex for authenticated, persisted health records. Sleep, movement, meals, and model preferences are scoped to the signed-in user. IndexedDB is retained only as a one-time migration source and a local backup/erase aid; clearing browser data does not remove the Convex copy.
 
-Meal analysis is the only opt-in network operation. When requested, the selected image is resized in the browser, sent to the analysis endpoint, forwarded to the configured vision provider, and discarded after the response. Dayframe stores the editable estimate, never the image. API keys must never be committed to the repository or embedded in client code.
+Meal analysis is the only opt-in image network operation. When requested, the selected image is resized in the browser, sent to a Convex action, forwarded to the selected vision provider, and discarded after the response. Dayframe stores the editable estimate, never the image. OpenRouter BYOK keys are encrypted server-side and never returned to the client. API keys must never be committed to the repository or embedded in client code.
 
 ## Apple Health
 
@@ -43,14 +43,14 @@ npm run lint
 npm run validate:artifact
 ```
 
-Photo estimates can be configured from **Settings** with a project-specific OpenAI API key. The key remains in that browser and is excluded from backups. A maintainer can instead configure the hosted runtime with:
+Photo estimates can be configured from **Settings** by choosing an OpenAI-hosted model or an OpenRouter model. OpenAI-hosted models require the Convex deployment secret:
 
 ```text
 OPENAI_API_KEY=your_key
 OPENAI_VISION_MODEL=your_vision_model
 ```
 
-Without a key, the tracker remains fully usable and meals can be entered manually. OpenAI API usage is billed separately from a ChatGPT subscription.
+For OpenRouter, each user can enter their own `sk-or-v1-...` key in Settings; it is encrypted before storage. Without a configured provider key, the tracker remains fully usable and meals can be entered manually. Provider API usage is billed separately from a ChatGPT subscription.
 
 ## Deployment
 
